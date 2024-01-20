@@ -31,9 +31,7 @@ def decode_dict(dct):
     for key, value in dct.items():
         if isinstance(value, list):
             dct[key] = np.array(value)
-    return dct
-
-
+    return OrderedDict(sorted(list(dct.items()), key=lambda x: x[0]))
 
 
 def collect_images(cameras_cofig_file: str, num_frames_to_collect, frame_collection_interval=1):
@@ -87,7 +85,7 @@ def check_and_get_target_corners(image_uri: str, num_target_corners: tuple[int, 
     
     if not ret_corners:
         return image_uri, None
-    return image_uri, cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), subpix_criteria)
+    return image_uri, cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), subpix_criteria).squeeze()
 
 def find_all_calibration_targets(image_dir: str, num_target_corners: Tuple[int, int], num_workers: int = 8) -> dict[str, Tuple[str, np.ndarray]]:
     
@@ -119,47 +117,63 @@ def find_all_calibration_targets(image_dir: str, num_target_corners: Tuple[int, 
 def Z_norm(array: np.ndarray, axis: int = 0) -> np.ndarray:
     return (array - array.mean(axis=axis)) / array.std(axis=axis)
 
-def filter_images_for_intrinsics(cam_uuid: str, pattern_top_std_exclusion_percentle: float = 10):
+def filter_images_for_intrinsics(cam_uuid: str, point_top_std_exclusion_percentle: float = 10, distance_measure_exclusion_percentile: float = 50):
     
-    valid_images = OrderedDict()
-    invalid_images = OrderedDict()
+    valid_targets = OrderedDict()
+    invalid_targets = OrderedDict()
     
-    logger.info(f"{cam_uuid} :: extracting target corners")
-    image_data = get_images_with_calibration_target(image_dir=f"./images/{cam_uuid}")
-    
-    # TODO: check if images are in correct order
-    
-    # filter out images without target corners
-    for k in image_data:
-        if image_data[k] is None:
-            invalid_images[k] = None
-        else:
-            valid_images[k] = image_data[k]
-    
+    logger.info(f"{cam_uuid} :: loading extracted target corners")
+    with open(os.path.join("calibration_target_results", f"{cam_uuid}.json"), "r") as f:
+        all_targets = json.load(f, object_hook=decode_dict)
+        for k in all_targets:
+            if all_targets[k] is not None:
+                
+                assert (all_targets[k] >= 0).all(), f"{cam_uuid} :: target in {k} has negative values"
+                
+                valid_targets[k] = all_targets[k]
+                continue
+            invalid_targets[k] = None
+        
+    if len(valid_targets) == 0:
+        logger.warning(f"{cam_uuid} :: no valid targets after removing None values")
+        return
+    logger.info(f"{cam_uuid} :: {len(valid_targets)} valid targets after removing None values")
+        
     # filter out images where the normaized pattern has too high std
-    normalised_patterns = np.stack([Z_norm(valid_target.squeeze()) for valid_target in valid_images.values], axis=0)
-    pattern_std = normalised_patterns.std(axis=0)
-    top_std_percentile_threshold = np.percentile(pattern_std, (100 - pattern_top_std_exclusion_percentle), axis=0)
-    valid_variance_mask = normalised_patterns > np.expand_dims(top_std_percentile_threshold, axis=0)
+    normalised_patterns = np.stack([Z_norm(valid_target) for valid_target in valid_targets.values()], axis=0)
+    per_point_std = np.sqrt((normalised_patterns - normalised_patterns.mean(axis=0))**2)
+    top_std_percentile_threshold = np.percentile(per_point_std, (100 - point_top_std_exclusion_percentle), axis=0)
+    valid_std_mask = per_point_std <= np.expand_dims(top_std_percentile_threshold, axis=0)
     
-    print("valid_variance_mask", valid_variance_mask.shape)
+    # print("normalised_patterns", normalised_patterns)
+    # print("pattern_std", per_point_std)
+    # print("top_std_percentile_threshold", top_std_percentile_threshold)
+    # print("valid_variance_mask", valid_std_mask)
     
-    print("number of imaes before filtering", len(valid_images))
+    all_targets = valid_targets.copy()
+    for i, (k, v) in enumerate(all_targets.items()):
+        
+        if not valid_std_mask[i].all():
+            invalid_targets[k] = v
+            valid_targets.pop(k)
     
-    for i, (k, v) in enumerate(valid_images.items()):
-        if valid_variance_mask[i].any():
-            invalid_images[k] = v
-            valid_images.pop(k)
-    
-    print("number of imaes after filtering", len(valid_images))
+    if len(valid_targets) == 0:
+        logger.warning(f"{cam_uuid} :: no valid targets after removing high std targets")
+        return
+    logger.info(f"{cam_uuid} :: {len(valid_targets)} valid targets after removing high std targets")
     
     
-    # filter out images so that they the means of the targets are evenly distributed
-    target_means = np.stack([valid_target.mean(axis=0) for valid_target in valid_images.values], axis=0)
-    normalised_pattern_means = Z_norm(target_means)
-
-
-
+    
+    # filter out images with targets means too close to each other
+    target_means = np.stack([valid_target.mean(axis=0) for valid_target in valid_targets.values()], axis=0)
+    avg_total_distances = np.stack([np.sqrt(((target_means[i] - target_means)**2).sum(axis=0)).mean(axis=0) for i in range(target_means.shape[0])], axis=0)
+    valid_distance_mask = avg_total_distances > np.percentile(avg_total_distances, distance_measure_exclusion_percentile)
+    
+    print(avg_total_distances)
+    print("valid_distance_mask", valid_distance_mask)
+    print("valid_targets", target_means[valid_distance_mask])
+    
+    
 
 def prepare_checkerboard_model_points(num_target_corners: tuple[int, int], targets_size: tuple[int, int]):
     """
