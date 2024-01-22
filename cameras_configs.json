@@ -3,7 +3,7 @@
     "id": 0,
     "width": 1920,
     "height": 1080,
-    "fps": 30,
+    "fps": 60,
     "publishing_port": 10000,
     "name": "Logitech-StreamCam.center"
   },
@@ -11,7 +11,7 @@
     "id": 1,
     "width": 1920,
     "height": 1080,
-    "fps": 30,
+    "fps": 60,
     "publishing_port": 10001,
     "name": "Razer-Kiyo-1.left"
   },
@@ -19,7 +19,7 @@
     "id": 2,
     "width": 1920,
     "height": 1080,
-    "fps": 30,
+    "fps": 60,
     "publishing_port": 10002,
     "name": "Razer-Kiyo-2.right"
   }
