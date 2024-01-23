@@ -138,14 +138,15 @@ def remove_images_without_targets(cam_uuid: str):
     with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "w") as f:
         json.dump(valid_targets, f, cls=NumpyEncoder)
 
-
-def filter_images_for_intrinsics(cam_uuid: str, point_top_std_exclusion_percentle: float = 10, target_top_inverse_distance_exclusion_percentile: float = 20):
-    
+def load_targets(cam_uuid: str) -> dict[str, np.ndarray]:
     with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "r") as f:
-        valid_targets = json.load(f, object_hook=decode_dict)
+        targets = json.load(f, object_hook=decode_dict)
+    return targets
+
+def filter_images_for_intrinsics(targets: dict[str, np.ndarray], point_top_std_exclusion_percentle: float = 10, target_top_inverse_distance_exclusion_percentile: float = 20):
     
     # filter out images where the normaized pattern has too high std
-    normalised_patterns = np.stack([Z_norm(valid_target) for valid_target in valid_targets.values()], axis=0)
+    normalised_patterns = np.stack([Z_norm(valid_target) for valid_target in targets.values()], axis=0)
     per_point_std = np.sqrt((normalised_patterns - normalised_patterns.mean(axis=0))**2)
     top_std_percentile_threshold = np.percentile(per_point_std, (100 - point_top_std_exclusion_percentle), axis=0)
     valid_std_mask = per_point_std <= np.expand_dims(top_std_percentile_threshold, axis=0)
@@ -155,54 +156,64 @@ def filter_images_for_intrinsics(cam_uuid: str, point_top_std_exclusion_percentl
     # print("top_std_percentile_threshold", top_std_percentile_threshold)
     # print("valid_variance_mask", valid_std_mask)
     
-    for i, (k, v) in enumerate(valid_targets.items()):
+    for i, (k, v) in enumerate(targets.items()):
         if not valid_std_mask[i].all():
-            valid_targets[k] = None
-    valid_targets = OrderedDict([(k, v) for (k, v) in valid_targets.items() if v is not None])
+            targets[k] = None
+    targets = OrderedDict([(k, v) for (k, v) in targets.items() if v is not None])
     
-    if len(valid_targets) == 0:
-        logger.warning(f"{cam_uuid} :: no valid targets after removing high per point std targets")
+    if len(targets) == 0:
+        logger.warning(f"no valid targets after removing high per point std targets")
         return
-    logger.info(f"{cam_uuid} :: {len(valid_targets)} valid targets after removing high per point std targets")
+    logger.info(f"{len(targets)} valid targets after removing high per point std targets")
     
     
     # filter out images with targets means too close to each other
-    target_means = np.stack([valid_target.mean(axis=0) for valid_target in valid_targets.values()], axis=0)
+    target_means = np.stack([valid_target.mean(axis=0) for valid_target in targets.values()], axis=0)
     normed_target_means = Z_norm(target_means)
     avg_total_distances_inv = np.stack([np.exp( - ((normed_target_means[i] - normed_target_means)**2).mean(axis=0)).mean(axis=0) for i in range(normed_target_means.shape[0])], axis=0)
     valid_distance_mask = avg_total_distances_inv < np.percentile(avg_total_distances_inv, 100 - target_top_inverse_distance_exclusion_percentile)
     
     # print("normed_target_means", normed_target_means)
     # print("valid_distance_mask", valid_distance_mask)
-    # print("valid_targets", target_means[valid_distance_mask])
+    # print("targets", target_means[valid_distance_mask])
     # print("avg_total_distance", avg_total_distances_inv)
     
-    for i, (k, v) in enumerate(valid_targets.items()):
+    for i, (k, v) in enumerate(targets.items()):
         if not valid_distance_mask[i]:
-            valid_targets[k] = None
-    valid_targets = OrderedDict([(k, v) for (k, v) in valid_targets.items() if v is not None])
+            targets[k] = None
+    targets = OrderedDict([(k, v) for (k, v) in targets.items() if v is not None])
     
-    if len(valid_targets) == 0:
-        logger.warning(f"{cam_uuid} :: no valid targets after removing high per target mean std targets")
+    if len(targets) == 0:
+        logger.warning(f"no valid targets after removing high per target mean std targets")
         return
-    logger.info(f"{cam_uuid} :: {len(valid_targets)} valid targets after removing high per target mean std targets")
+    logger.info(f"{len(targets)} valid targets after removing high per target mean std targets")
     
-    return valid_targets
+    return targets
 
-
-def calibration_intrinsics(
-    targets: OrderedDict[str, np.ndarray], 
-    num_target_corners: Tuple[int, int] = (3, 4), # (width, height) number of targets on the checkerboard
-    target_size: Tuple[float, float] = (0.05, 0.055), # (width, height) of each target on the checkerboard in meters (m)
-    capture_size: Tuple[int, int] = (1920, 1080)): # (width, height) of the capture camera
-    
-    target_points = np.array([*targets.values()], dtype=np.float32)
-    
-    # prepare model points
+def generate_target_points(num_target_corners: Tuple[int, int], target_size: Tuple[float, float], num_target_points: int):
     model_points = np.mgrid[:num_target_corners[0], :num_target_corners[1]].T.reshape(-1,2)
     model_points = model_points * target_size
     model_points = np.concatenate([model_points, np.zeros([model_points.shape[0], 1])], axis=1).astype(np.float32)
-    model_points = np.array(len(target_points) * [model_points], dtype=np.float32)
+    model_points = np.array(num_target_points * [model_points], dtype=np.float32)
+    return model_points
+
+def calibrate_intrinsics(
+    cam_uuid: str,
+    num_target_corners: Tuple[int, int] = (3, 4), # (width, height) number of targets on the checkerboard
+    target_size: Tuple[float, float] = (0.05, 0.055), # (width, height) of each target on the checkerboard in meters (m)
+    capture_size: Tuple[int, int] = (1920, 1080), # (width, height) of the capture camera
+    batch_size: int = 30,
+    optim_iterations: int = 3):
+    
+    logger.info(f"calibrating camera {cam_uuid} intrinsics ...")
+    
+    # load and filter targets
+    targets = load_targets(cam_uuid)
+    targets = filter_images_for_intrinsics(targets, point_top_std_exclusion_percentle=0, target_top_inverse_distance_exclusion_percentile=0)
+    target_points = np.array([*targets.values()], dtype=np.float32)
+    
+    # prepare model points
+    model_points = generate_target_points(num_target_corners, target_size, target_points.shape[0])
     
     effective_focal_length = capture_size # (width, height) focal length in pixels, because pixel density might be different in height and width and are also unknown
     principle_point = (capture_size[0] / 2, capture_size[1] / 2)    
@@ -216,9 +227,6 @@ def calibration_intrinsics(
     )
     dist_coeffs = np.zeros((5, 1), np.float32)
     
-    
-    batch_size = 30
-    optim_iterations = 3
     
     logger.info(f"calibrating camera with {batch_size} samples per iteration for {optim_iterations} iterations ...")
     avg_rmse = 0
@@ -243,4 +251,98 @@ def calibration_intrinsics(
     # print("dist_coeffs_", dist_coeffs)
     # print("r_vecs", r_vecs)
     # print("t_vecs", t_vecs)
+    
+    logger.info(f"saving calibration intrinsics to calibration_intrinsics/{cam_uuid}.json")
+    with open(os.path.join("calibration_intrinsics", f"{cam_uuid}.json"), "w") as f:
+        json.dump({
+            "calibration_matrix": calibration_matrix,
+            "dist_coeffs": dist_coeffs,
+            "r_vecs": r_vecs,
+            "t_vecs": t_vecs,
+            "avg_rmse": avg_rmse / optim_iterations
+        }, f, cls=NumpyEncoder)
 
+
+def calibrate_extrinsics(
+    cameras: List[Camera],
+    main_cam_uuid: str = "cam0",
+    capture_size: Tuple[int, int] = (1920, 1080),
+    target_size: Tuple[float, float] = (0.05, 0.055),
+    num_target_corners: Tuple[int, int] = (3, 4),
+    batch_size: int = 30,
+    optim_iterations: int = 3
+):
+    
+    logger.info(f"calibrating camera extrinsics ...")
+    
+    # load intrinsics
+    intrinsics = {}
+    for cam in cameras:
+        assert os.path.exists(os.path.join("calibration_intrinsics", f"{cam.uuid}.json")), f"no intrinsics found for camera {cam.uuid}"
+        with open(os.path.join("calibration_intrinsics", f"{cam.uuid}.json"), "r") as f:
+            intrinsics[cam.uuid] = json.load(f, object_hook=decode_dict)
+    
+    # load targets and change exclude targets that are not represented in all cameras
+    all_frames = {}
+    for cam in cameras:
+        targets = load_targets(cam.uuid)
+        
+        for image_uri in targets:
+            
+            frame_id = os.path.basename(image_uri)
+            
+            if frame_id not in all_frames:
+                all_frames[frame_id] = {cam.uuid: targets[image_uri]}
+            else:
+                all_frames[frame_id][cam.uuid] = targets[image_uri]
+            
+    all_valid_frames = {}
+    for frame_id in all_frames:
+        if len(all_frames[frame_id]) == len(cameras):
+            all_valid_frames[frame_id] = all_frames[frame_id]
+    
+    logger.info(f"found {len(all_valid_frames)} frames with targets in all cameras")
+    
+    # prepare model points
+    model_points = generate_target_points(num_target_corners, target_size, len(all_valid_frames))
+    
+    all_valid_frames_by_cam = {}
+    for cam in cameras:
+        all_valid_frames_by_cam[cam.uuid] = np.array([all_valid_frames[frame_id][cam.uuid] for frame_id in all_valid_frames], dtype=np.float32)
+    
+    
+    main_cam_matrix = intrinsics[main_cam_uuid]["calibration_matrix"]
+    main_cam_dist_coeffs = intrinsics[main_cam_uuid]["dist_coeffs"]
+    
+    for cam in cameras:
+        if cam.uuid == main_cam_uuid:
+            continue
+        
+        logger.info(f"calibrating camera {cam.uuid} stereo with {batch_size} samples per iteration for {optim_iterations} iterations ...")
+        avg_rmse = 0
+        for e in range(optim_iterations):
+            
+            # select batch
+            rand_indexes = np.random.randint(model_points.shape[0], size=batch_size)
+            
+            model_points_ = model_points[rand_indexes, :, :]
+            main_cam_target_points = all_valid_frames_by_cam[main_cam_uuid][rand_indexes, :, :]
+            target2_points = all_valid_frames_by_cam[cam.uuid][rand_indexes, :, :]
+            
+            rmse, cm1, dist1, cm2, dist2, r, t, e, f = cv2.stereoCalibrate(
+                objectPoints=model_points_,
+                imagePoints1=main_cam_target_points,
+                imagePoints2=target2_points,
+                imageSize=capture_size,
+                cameraMatrix1=main_cam_matrix,
+                distCoeffs1=main_cam_dist_coeffs,
+                cameraMatrix2=intrinsics[cam.uuid]["calibration_matrix"],
+                distCoeffs2=intrinsics[cam.uuid]["dist_coeffs"],
+                flags=cv2.CALIB_FIX_INTRINSIC
+            )
+            
+            logger.info(f"iteration {e} :: rmse {rmse}")
+            avg_rmse += rmse
+        
+        print("avg_rmse", avg_rmse / optim_iterations)
+    
