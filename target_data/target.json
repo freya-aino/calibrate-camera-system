@@ -1,0 +1,5 @@
+{
+    "target_type": "checkerboard",
+    "num_target_corners": [3, 4],
+    "target_size_meters": [0.055, 0.05]
+}

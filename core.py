@@ -35,7 +35,7 @@ def decode_dict(dct):
     return OrderedDict(sorted(list(dct.items()), key=lambda x: x[0]))
 
 
-def collect_images(cameras_cofig_file: str, num_frames_to_collect, frame_collection_interval=1):
+def collect_images(cameras_cofig_file: str, num_frames_to_collect: int, frame_transforms: dict[str, str], frame_collection_interval=1):
     
     logger.info("initialize image collection")
     
@@ -43,7 +43,7 @@ def collect_images(cameras_cofig_file: str, num_frames_to_collect, frame_collect
     cameras = load_all_cameras_from_config(cameras_cofig_file)
     
     # initialize camera capture publisher
-    multi_capture_publisher = MultiCapturePublisher(cameras=cameras)
+    multi_capture_publisher = MultiCapturePublisher(cameras=cameras, frame_transforms=frame_transforms)
     
     # initialize capture save processor
     image_params = ImageParameters(
@@ -88,9 +88,11 @@ def check_and_get_target_corners(image_uri: str, num_target_corners: tuple[int, 
         return image_uri, None
     return image_uri, cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), subpix_criteria).squeeze()
 
-def find_all_calibration_targets(image_dir: str, num_target_corners: Tuple[int, int], num_workers: int = 8) -> dict[str, Tuple[str, np.ndarray]]:
+def find_all_calibration_targets(cam_uuid: str, num_target_corners: Tuple[int, int], num_workers: int = 8) -> dict[str, Tuple[str, np.ndarray]]:
     
-    image_uris = [os.path.join(image_dir, image_name) for image_name in os.listdir(image_dir)]
+    image_path = os.path.join("images", cam_uuid)
+    
+    image_uris = [os.path.join(image_path, image_name) for image_name in os.listdir(image_path)]
     process_pool = Pool(num_workers)
     process_results = []
     
@@ -101,7 +103,7 @@ def find_all_calibration_targets(image_dir: str, num_target_corners: Tuple[int, 
             
         results = OrderedDict([result.get() for result in process_results])
         
-        with open(os.path.join("calibration_target_results", f"{image_dir.split('/')[-1]}.json"), "w") as f:
+        with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "w") as f:
             json.dump(results, f, cls=NumpyEncoder)
         
     except:
@@ -123,7 +125,7 @@ def remove_images_without_targets(cam_uuid: str):
     valid_targets = {}
     
     logger.info(f"{cam_uuid} :: loading extracted target corners and removing images without targets ...")
-    with open(os.path.join("calibration_target_results", f"{cam_uuid}.json"), "r") as f:
+    with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "r") as f:
         all_targets = json.load(f, object_hook=decode_dict)
         for k in all_targets:
             if all_targets[k] is None:
@@ -133,13 +135,13 @@ def remove_images_without_targets(cam_uuid: str):
                 valid_targets[k] = all_targets[k]
     
     # save updated list of targets
-    with open(os.path.join("calibration_target_results", f"{cam_uuid}.json"), "w") as f:
+    with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "w") as f:
         json.dump(valid_targets, f, cls=NumpyEncoder)
 
 
 def filter_images_for_intrinsics(cam_uuid: str, point_top_std_exclusion_percentle: float = 10, target_top_inverse_distance_exclusion_percentile: float = 20):
     
-    with open(os.path.join("calibration_target_results", f"{cam_uuid}.json"), "r") as f:
+    with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "r") as f:
         valid_targets = json.load(f, object_hook=decode_dict)
     
     # filter out images where the normaized pattern has too high std
@@ -215,8 +217,8 @@ def calibration_intrinsics(
     dist_coeffs = np.zeros((5, 1), np.float32)
     
     
-    batch_size = 20
-    optim_iterations = 10
+    batch_size = 30
+    optim_iterations = 3
     
     logger.info(f"calibrating camera with {batch_size} samples per iteration for {optim_iterations} iterations ...")
     avg_rmse = 0
@@ -234,47 +236,11 @@ def calibration_intrinsics(
             cameraMatrix=calibration_matrix, 
             distCoeffs=dist_coeffs)
         
+        logger.info(f"iteration {e} :: rmse {rmse}")
         avg_rmse += rmse
         
-    print("avg_rmse", avg_rmse / optim_iterations)
     # print("calibration_matrix", calibration_matrix)
     # print("dist_coeffs_", dist_coeffs)
     # print("r_vecs", r_vecs)
     # print("t_vecs", t_vecs)
 
-
-# rmse, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(object_points, image_points, capture_size, None, None)
-# camera_matrix, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, capture_size, 1, capture_size)
-
-
-# rotation_matrix = np.eye(3)
-# translation_vector = np.array([[0, 0, 1]]).T
-
-
-# def get_projection_matrix(calibration_matrix, rotation_matrix, translation_vector):
-#     intrinsic_matrix = np.concatenate([calibration_matrix, np.zeros((3, 1))], axis=1)
-#     extrinsic_matrix = np.concatenate([np.concatenate([rotation_matrix, translation_vector], axis=1), np.array([[0, 0, 0, 1]])], axis=0)
-#     return intrinsic_matrix @ extrinsic_matrix
-
-# def get_componetes_from_projection_matrix(projection_matrix):
-#     rotation_matrix_, calibration_matrix_ = np.linalg.qr(projection_matrix[:3, :3])
-#     translation_vector_ = np.linalg.inv(calibration_matrix_) @ projection_matrix[:3, -1]
-#     return calibration_matrix_, rotation_matrix_, translation_vector_
-
-
-# projection_matrix = get_projection_matrix(calibration_matrix, rotation_matrix, translation_vector)
-
-
-# world_space_point = np.array([0.5, 0.55, 0, 1])
-# print(projection_matrix @ world_space_point)
-# print(np.linalg.inv(projection_matrix) @ projection_matrix @ world_space_point)
-
-
-# # TODO:
-# cv2.initCameraMatrix2D()
-
-# # there is also matMulDeriv for manual calculation
-# cv2.matMulDeriv()
-
-# # dose the same as above get_components_from_projection_matrix
-# cv2.decomposeProjectionMatrix()
