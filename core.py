@@ -199,17 +199,19 @@ def generate_target_points(num_target_corners: Tuple[int, int], target_size: Tup
 
 def calibrate_intrinsics(
     cam_uuid: str,
-    num_target_corners: Tuple[int, int] = (3, 4), # (width, height) number of targets on the checkerboard
-    target_size: Tuple[float, float] = (0.05, 0.055), # (width, height) of each target on the checkerboard in meters (m)
-    capture_size: Tuple[int, int] = (1920, 1080), # (width, height) of the capture camera
+    num_target_corners: Tuple[int, int], # (width, height) number of targets on the checkerboard
+    target_size: Tuple[float, float], # (width, height) of each target on the checkerboard in meters (m)
+    capture_size: Tuple[int, int], # (width, height) of the capture camera
     batch_size: int = 30,
-    optim_iterations: int = 3):
+    optim_iterations: int = 3,
+    point_top_std_exclusion_percentle=10,
+    target_top_inverse_distance_exclusion_percentile=10):
     
     logger.info(f"calibrating camera {cam_uuid} intrinsics ...")
     
     # load and filter targets
     targets = load_targets(cam_uuid)
-    targets = filter_images_for_intrinsics(targets, point_top_std_exclusion_percentle=0, target_top_inverse_distance_exclusion_percentile=0)
+    targets = filter_images_for_intrinsics(targets, point_top_std_exclusion_percentle=point_top_std_exclusion_percentle, target_top_inverse_distance_exclusion_percentile=target_top_inverse_distance_exclusion_percentile)
     target_points = np.array([*targets.values()], dtype=np.float32)
     
     # prepare model points
@@ -230,47 +232,51 @@ def calibrate_intrinsics(
     
     logger.info(f"calibrating camera with {batch_size} samples per iteration for {optim_iterations} iterations ...")
     avg_rmse = 0
-    for e in range(optim_iterations):
+    avg_calibration_matrix = np.zeros((3, 3), np.float32)
+    avg_dist_coeffs = np.zeros((5, 1), np.float32)
+    for i in range(optim_iterations):
         
         # select batch
         rand_indexes = np.random.randint(model_points.shape[0], size=batch_size)
         model_points_ = model_points[rand_indexes, :, :]
         target_points_ = target_points[rand_indexes, :, :]
         
-        rmse, calibration_matrix, dist_coeffs, r_vecs, t_vecs = cv2.calibrateCamera(
+        rmse, calibration_matrix_, dist_coeffs_, r_vecs, t_vecs = cv2.calibrateCamera(
             objectPoints=model_points_, 
             imagePoints=target_points_, 
             imageSize=capture_size, 
             cameraMatrix=calibration_matrix, 
             distCoeffs=dist_coeffs)
         
-        logger.info(f"iteration {e} :: rmse {rmse}")
+        logger.info(f"iteration {i} :: rmse {rmse}")
         avg_rmse += rmse
-        
-    # print("calibration_matrix", calibration_matrix)
-    # print("dist_coeffs_", dist_coeffs)
-    # print("r_vecs", r_vecs)
-    # print("t_vecs", t_vecs)
+        avg_calibration_matrix += calibration_matrix_
+        avg_dist_coeffs += dist_coeffs_
+    
+    logger.info(f"avg_rmse {avg_rmse / optim_iterations}")
+    calibration_matrix = avg_calibration_matrix / optim_iterations
+    dist_coeffs = avg_dist_coeffs / optim_iterations
+    rmse = avg_rmse / optim_iterations
     
     logger.info(f"saving calibration intrinsics to calibration_intrinsics/{cam_uuid}.json")
     with open(os.path.join("calibration_intrinsics", f"{cam_uuid}.json"), "w") as f:
         json.dump({
             "calibration_matrix": calibration_matrix,
             "dist_coeffs": dist_coeffs,
-            "r_vecs": r_vecs,
-            "t_vecs": t_vecs,
-            "avg_rmse": avg_rmse / optim_iterations
+            "avg_rmse": rmse
         }, f, cls=NumpyEncoder)
 
 
 def calibrate_extrinsics(
     cameras: List[Camera],
-    main_cam_uuid: str = "cam0",
-    capture_size: Tuple[int, int] = (1920, 1080),
-    target_size: Tuple[float, float] = (0.05, 0.055),
-    num_target_corners: Tuple[int, int] = (3, 4),
+    main_cam_uuid: str,
+    capture_size: Tuple[int, int],
+    target_size: Tuple[float, float],
+    num_target_corners: Tuple[int, int],
     batch_size: int = 30,
-    optim_iterations: int = 3
+    optim_iterations: int = 3,
+    point_top_std_exclusion_percentle=10,
+    target_top_inverse_distance_exclusion_percentile=10
 ):
     
     logger.info(f"calibrating camera extrinsics ...")
@@ -286,6 +292,10 @@ def calibrate_extrinsics(
     all_frames = {}
     for cam in cameras:
         targets = load_targets(cam.uuid)
+        targets = filter_images_for_intrinsics(
+            targets, 
+            point_top_std_exclusion_percentle=point_top_std_exclusion_percentle, 
+            target_top_inverse_distance_exclusion_percentile=target_top_inverse_distance_exclusion_percentile)
         
         for image_uri in targets:
             
@@ -314,13 +324,18 @@ def calibrate_extrinsics(
     main_cam_matrix = intrinsics[main_cam_uuid]["calibration_matrix"]
     main_cam_dist_coeffs = intrinsics[main_cam_uuid]["dist_coeffs"]
     
+    extrinsic_output = {}
     for cam in cameras:
         if cam.uuid == main_cam_uuid:
             continue
         
-        logger.info(f"calibrating camera {cam.uuid} stereo with {batch_size} samples per iteration for {optim_iterations} iterations ...")
+        logger.info(f"stereo calibrating {main_cam_uuid} with camera {cam.uuid} stereo with {batch_size} samples per iteration for {optim_iterations} iterations ...")
         avg_rmse = 0
-        for e in range(optim_iterations):
+        avg_rotation_mat = np.zeros((3, 3), np.float32)
+        avg_translation_vec = np.zeros((3, 1), np.float32)
+        avg_essential_mat = np.zeros((3, 3), np.float32)
+        avg_fundamental_mat = np.zeros((3, 3), np.float32)
+        for i in range(optim_iterations):
             
             # select batch
             rand_indexes = np.random.randint(model_points.shape[0], size=batch_size)
@@ -329,7 +344,7 @@ def calibrate_extrinsics(
             main_cam_target_points = all_valid_frames_by_cam[main_cam_uuid][rand_indexes, :, :]
             target2_points = all_valid_frames_by_cam[cam.uuid][rand_indexes, :, :]
             
-            rmse, cm1, dist1, cm2, dist2, r, t, e, f = cv2.stereoCalibrate(
+            rmse, _, _, _, _, r, t, e, f = cv2.stereoCalibrate(
                 objectPoints=model_points_,
                 imagePoints1=main_cam_target_points,
                 imagePoints2=target2_points,
@@ -341,8 +356,45 @@ def calibrate_extrinsics(
                 flags=cv2.CALIB_FIX_INTRINSIC
             )
             
-            logger.info(f"iteration {e} :: rmse {rmse}")
+            logger.info(f"iteration {i} :: rmse {rmse}")
             avg_rmse += rmse
+            avg_rotation_mat += r
+            avg_translation_vec += t
+            avg_essential_mat += e
+            avg_fundamental_mat += f
         
-        print("avg_rmse", avg_rmse / optim_iterations)
-    
+        logger.info(f"avg_rmse {avg_rmse / optim_iterations}")
+        rmse = avg_rmse / optim_iterations
+        rotation_mat = avg_rotation_mat / optim_iterations
+        translation_vec = avg_translation_vec / optim_iterations
+        essential_mat = avg_essential_mat / optim_iterations
+        fundamental_mat = avg_fundamental_mat / optim_iterations
+        
+        extrinsic_output[cam.uuid] = {
+            "rmse": rmse,
+            "rotation_mat": rotation_mat,
+            "translation_vec": translation_vec,
+            "essential_mat": essential_mat,
+            "fundamental_mat": fundamental_mat
+        }
+        
+    with open(os.path.join("calibration_extrinsics.json"), "w") as f:
+        json.dump({
+            "main_cam_uuid": main_cam_uuid,
+            "extrinsics": extrinsic_output
+        }, f, cls=NumpyEncoder)
+
+
+class CameraCalibrater:
+    def __init__(self, cameras: List[Camera], main_cam_uuid: str):
+        
+        self.intrinsics = {}
+        for cam in cameras:
+            assert os.path.exists(os.path.join("calibration_intrinsics", f"{cam.uuid}.json")), f"no intrinsics found for camera {cam.uuid}"
+            with open(os.path.join("calibration_intrinsics", f"{main_cam_uuid}.json"), "r") as f:
+                self.intrinsics[cam.uuid] = json.load(f, object_hook=decode_dict)
+        
+        with open("calibration_extrinsics.json", "r") as f:
+            self.extrinsics = json.load(f, object_hook=decode_dict)
+            
+        
