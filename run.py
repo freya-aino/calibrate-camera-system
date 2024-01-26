@@ -20,7 +20,6 @@ arg_parser.add_argument("--calibrate-intrinsics", action="store_true")
 arg_parser.add_argument("--calibrate-extrinsics", action="store_true")
 arg_parser.add_argument("--calibration-iterations", type=int, default=3)
 arg_parser.add_argument("--calibration-batch-size", type=int, default=40)
-arg_parser.add_argument("--main-cam-uuid", type=str, default="cam0")
 arg_parser.add_argument("--point-top-std-exclusion-percentle", type=float, default=5)
 arg_parser.add_argument("--target_top_inverse_distance_exclusion_percentile", type=float, default=5)
 
@@ -91,7 +90,6 @@ if __name__ == "__main__":
         logger.info(" --- Calibrating extrinsics ...")
         calibrate_extrinsics(
             cameras,
-            main_cam_uuid=args.main_cam_uuid,
             num_target_corners=target_data["num_target_corners"],
             target_size=target_data["target_size_meters"],
             capture_size=output_capture_size,

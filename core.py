@@ -269,7 +269,6 @@ def calibrate_intrinsics(
 
 def calibrate_extrinsics(
     cameras: List[Camera],
-    main_cam_uuid: str,
     capture_size: Tuple[int, int],
     target_size: Tuple[float, float],
     num_target_corners: Tuple[int, int],
@@ -321,80 +320,137 @@ def calibrate_extrinsics(
         all_valid_frames_by_cam[cam.uuid] = np.array([all_valid_frames[frame_id][cam.uuid] for frame_id in all_valid_frames], dtype=np.float32)
     
     
-    main_cam_matrix = intrinsics[main_cam_uuid]["calibration_matrix"]
-    main_cam_dist_coeffs = intrinsics[main_cam_uuid]["dist_coeffs"]
-    
     extrinsic_output = {}
-    for cam in cameras:
-        if cam.uuid == main_cam_uuid:
-            continue
+    for main_cam in cameras:
         
-        logger.info(f"stereo calibrating {main_cam_uuid} with camera {cam.uuid} stereo with {batch_size} samples per iteration for {optim_iterations} iterations ...")
-        avg_rmse = 0
-        avg_rotation_mat = np.zeros((3, 3), np.float32)
-        avg_translation_vec = np.zeros((3, 1), np.float32)
-        avg_essential_mat = np.zeros((3, 3), np.float32)
-        avg_fundamental_mat = np.zeros((3, 3), np.float32)
-        for i in range(optim_iterations):
-            
-            # select batch
-            rand_indexes = np.random.randint(model_points.shape[0], size=batch_size)
-            
-            model_points_ = model_points[rand_indexes, :, :]
-            main_cam_target_points = all_valid_frames_by_cam[main_cam_uuid][rand_indexes, :, :]
-            target2_points = all_valid_frames_by_cam[cam.uuid][rand_indexes, :, :]
-            
-            rmse, _, _, _, _, r, t, e, f = cv2.stereoCalibrate(
-                objectPoints=model_points_,
-                imagePoints1=main_cam_target_points,
-                imagePoints2=target2_points,
-                imageSize=capture_size,
-                cameraMatrix1=main_cam_matrix,
-                distCoeffs1=main_cam_dist_coeffs,
-                cameraMatrix2=intrinsics[cam.uuid]["calibration_matrix"],
-                distCoeffs2=intrinsics[cam.uuid]["dist_coeffs"],
-                flags=cv2.CALIB_FIX_INTRINSIC
-            )
-            
-            logger.info(f"iteration {i} :: rmse {rmse}")
-            avg_rmse += rmse
-            avg_rotation_mat += r
-            avg_translation_vec += t
-            avg_essential_mat += e
-            avg_fundamental_mat += f
+        main_cam_matrix = intrinsics[main_cam.uuid]["calibration_matrix"]
+        main_cam_dist_coeffs = intrinsics[main_cam.uuid]["dist_coeffs"]
         
-        logger.info(f"avg_rmse {avg_rmse / optim_iterations}")
-        rmse = avg_rmse / optim_iterations
-        rotation_mat = avg_rotation_mat / optim_iterations
-        translation_vec = avg_translation_vec / optim_iterations
-        essential_mat = avg_essential_mat / optim_iterations
-        fundamental_mat = avg_fundamental_mat / optim_iterations
+        extrinsic_output[main_cam.uuid] = {}
         
-        extrinsic_output[cam.uuid] = {
-            "rmse": rmse,
-            "rotation_mat": rotation_mat,
-            "translation_vec": translation_vec,
-            "essential_mat": essential_mat,
-            "fundamental_mat": fundamental_mat
-        }
+        for cam in [c for c in cameras if c.uuid != main_cam.uuid]:
+            
+            logger.info(f"stereo calibrating {main_cam.uuid} with camera {cam.uuid} stereo with {batch_size} samples per iteration for {optim_iterations} iterations ...")
+            avg_rmse = 0
+            avg_rotation_mat = np.zeros((3, 3), np.float32)
+            avg_translation_vec = np.zeros((3, 1), np.float32)
+            avg_essential_mat = np.zeros((3, 3), np.float32)
+            avg_fundamental_mat = np.zeros((3, 3), np.float32)
+            for i in range(optim_iterations):
+                
+                # select batch
+                rand_indexes = np.random.randint(model_points.shape[0], size=batch_size)
+                
+                model_points_ = model_points[rand_indexes, :, :]
+                main_cam_target_points = all_valid_frames_by_cam[main_cam.uuid][rand_indexes, :, :]
+                target2_points = all_valid_frames_by_cam[cam.uuid][rand_indexes, :, :]
+                
+                rmse, _, _, _, _, r, t, e, f = cv2.stereoCalibrate(
+                    objectPoints=model_points_,
+                    imagePoints1=main_cam_target_points,
+                    imagePoints2=target2_points,
+                    imageSize=capture_size,
+                    cameraMatrix1=main_cam_matrix,
+                    distCoeffs1=main_cam_dist_coeffs,
+                    cameraMatrix2=intrinsics[cam.uuid]["calibration_matrix"],
+                    distCoeffs2=intrinsics[cam.uuid]["dist_coeffs"],
+                    flags=cv2.CALIB_FIX_INTRINSIC
+                )
+                
+                logger.info(f"iteration {i} :: rmse {rmse}")
+                avg_rmse += rmse
+                avg_rotation_mat += r
+                avg_translation_vec += t
+                avg_essential_mat += e
+                avg_fundamental_mat += f
+            
+            logger.info(f"avg_rmse {avg_rmse / optim_iterations}")
+            rmse = avg_rmse / optim_iterations
+            rotation_mat = avg_rotation_mat / optim_iterations
+            translation_vec = avg_translation_vec / optim_iterations
+            essential_mat = avg_essential_mat / optim_iterations
+            fundamental_mat = avg_fundamental_mat / optim_iterations
+            
+            extrinsic_output[main_cam.uuid][cam.uuid] = {
+                "rmse": rmse,
+                "rotation_mat": rotation_mat,
+                "translation_vec": translation_vec,
+                "essential_mat": essential_mat,
+                "fundamental_mat": fundamental_mat
+            }
         
     with open(os.path.join("calibration_extrinsics.json"), "w") as f:
-        json.dump({
-            "main_cam_uuid": main_cam_uuid,
-            "extrinsics": extrinsic_output
-        }, f, cls=NumpyEncoder)
+        json.dump(extrinsic_output, f, cls=NumpyEncoder)
 
 
-class CameraCalibrater:
-    def __init__(self, cameras: List[Camera], main_cam_uuid: str):
-        
-        self.intrinsics = {}
-        for cam in cameras:
-            assert os.path.exists(os.path.join("calibration_intrinsics", f"{cam.uuid}.json")), f"no intrinsics found for camera {cam.uuid}"
-            with open(os.path.join("calibration_intrinsics", f"{main_cam_uuid}.json"), "r") as f:
-                self.intrinsics[cam.uuid] = json.load(f, object_hook=decode_dict)
-        
+class CameraTransformer:
+    def __init__(self, cameras: List[Camera]):
+                
         with open("calibration_extrinsics.json", "r") as f:
             self.extrinsics = json.load(f, object_hook=decode_dict)
-            
         
+        self.projection_matrices = {}
+        for cam in cameras:
+            assert os.path.exists(os.path.join("calibration_intrinsics", f"{cam.uuid}.json")), f"no intrinsics found for camera {cam.uuid}"
+            with open(os.path.join("calibration_intrinsics", f"{cam.uuid}.json"), "r") as f:
+                intrinsics = json.load(f, object_hook=decode_dict)
+            
+            self.projection_matrices[cam.uuid] = {c: intrinsics["calibration_matrix"] @ np.concatenate([self.extrinsics[cam.uuid][c]["rotation_mat"], self.extrinsics[cam.uuid][c]["translation_vec"]], axis=1) for c in self.extrinsics[cam.uuid]}
+            self.projection_matrices[cam.uuid][cam.uuid] = intrinsics["calibration_matrix"] @ np.concatenate([np.eye(3), np.zeros((3, 1))], axis=1)
+        
+    def triangulate_point(self, point2d: dict[str, np.ndarray], main_cam_uuid: str):
+        
+        # Create an empty list to store the equations
+        equations = []
+        
+        # For each 2D point
+        for cam_uuid, point in point2d.items():
+            # Get the corresponding projection matrix
+            P = self.projection_matrices[main_cam_uuid][cam_uuid]
+
+            # Create the equations
+            equations.append(point[0] * P[2, :] - P[0, :])
+            equations.append(point[1] * P[2, :] - P[1, :])
+
+        # Convert the list of equations to a numpy array
+        A = np.vstack(equations)
+
+        # Solve the system of equations using SVD
+        _, _, V = np.linalg.svd(A)
+
+        # The solution is the last column of V
+        point3d = V[-1, :]
+
+        # Convert the solution to homogeneous coordinates
+        point3d = point3d / point3d[3]
+
+        return point3d[:3]
+    
+    def DLT(self, points_2d: dict[str, np.ndarray], main_cam_uuid: str):
+        # direct linear transform
+
+        assert len(points_2d) >= 2, "at least points from 2 cameras are required"
+
+        # Get the number of points
+        num_points = next(iter(points_2d.values())).shape[0]
+
+        # Initialize an empty list to store the 3D points
+        points_3d = []
+
+        # For each point
+        for i in range(num_points):
+            # Initialize an empty dictionary to store the 2D points for this 3D point
+            point2d = {}
+
+            # For each camera
+            for cam_uuid, points in points_2d.items():
+                # Add the 2D point for this camera to the dictionary
+                point2d[cam_uuid] = points[i]
+
+            # Triangulate the 3D point
+            point3d = self.triangulate_point(point2d, main_cam_uuid)
+
+            # Add the 3D point to the list
+            points_3d.append(point3d)
+
+        return np.vstack(points_3d)
