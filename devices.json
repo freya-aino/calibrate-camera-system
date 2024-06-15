@@ -1,0 +1,26 @@
+[
+  {
+    "device_id": "@device_pnp_\\\\?\\usb#vid_046d&pid_0893&mi_00#6&dc72295&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global",
+    "name": "Logitech-StreamCam.center",
+    "device_type": "video",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30
+  },
+  {
+    "device_id": "@device_pnp_\\\\?\\usb#vid_1532&pid_0e05&mi_00#6&7de04d7&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global",
+    "name": "Razer-Kiyo-1.left",
+    "device_type": "video",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30
+  },
+  {
+    "device_id": "@device_pnp_\\\\?\\usb#vid_1532&pid_0e05&mi_00#6&1a97b57c&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global",
+    "name": "Razer-Kiyo-2.right",
+    "device_type": "video",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30
+  }
+]

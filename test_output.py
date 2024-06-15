@@ -1,12 +1,13 @@
 import numpy as np
 
-from core import CameraTransformer
-from camera_capture_system.core import load_all_cameras_from_config
+from calibrate_camera_system.core import CameraTransformer
+
+from device_capture_system.deviceIO import load_all_devices_from_config
 
 
 if __name__ == '__main__':
 
-    cameras = load_all_cameras_from_config("./cameras_configs.json")
+    cameras = load_all_devices_from_config("video", config_file="./devices.json")
     ct = CameraTransformer(cameras)
     
     test_points = {
