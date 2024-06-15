@@ -2,35 +2,35 @@ import cv2
 import numpy as np
 import os
 
+from multiprocessing import Pool
+from tqdm import tqdm
 from logging import getLogger
 from typing import List, Tuple, Dict
 from device_capture_system.datamodel import CameraDevice
 
-from .datamodel import CalibrationTarget, ModelExtrinsics, ModelIntrinsics, TargetData
+from .datamodel import Extrinsics, Intrinsics, TargetData, TargetParameters, TargetDataset
 
 
 def Z_norm(array: np.ndarray, axis: int = 0) -> np.ndarray:
     return (array - array.mean(axis=axis)) / array.std(axis=axis)
 
-def generate_model_points(calibration_target: CalibrationTarget, num_target_points: int):
-    target_corners_w = calibration_target.num_target_corners_wh[0]
-    target_corners_h = calibration_target.num_target_corners_wh[1]
-    target_size = calibration_target.target_size_wh
+def generate_model_points(target_parameters: TargetParameters, num_target_points: int):
+    target_corners_w = target_parameters.num_target_corners_wh[0]
+    target_corners_h = target_parameters.num_target_corners_wh[1]
+    target_size = target_parameters.target_size_wh_m
     model_points = np.mgrid[:target_corners_w, :target_corners_h].T.reshape(-1,2)
     model_points = model_points * target_size
     model_points = np.concatenate([model_points, np.zeros([model_points.shape[0], 1])], axis=1).astype(np.float32)
     model_points = np.array(num_target_points * [model_points], dtype=np.float32)
     return model_points
 
-class IntrinsicsCalibrator:
+class IntrinsicsCalibrationManager:
     
-    def __init__(self, camera: CameraDevice, capture_size: Tuple[int, int], calibration_target: CalibrationTarget, calibration_data_path: str = "./calibration_data"):
+    def __init__(self, capture_size: Tuple[int, int], target_parameters: TargetParameters):
         self.logger = getLogger(self.__class__.__name__)
         
-        self.camera = camera
-        self.calibration_target = calibration_target
+        self.target_parameters = target_parameters
         self.capture_size = capture_size
-        self.calibration_data_path = calibration_data_path
         
         # initial calibration matrix and distortion coefficients
         effective_focal_length = self.capture_size # (width, height) focal length in pixels, because pixel density might be different in height and width and are also unknown
@@ -43,62 +43,92 @@ class IntrinsicsCalibrator:
             ], np.float32
         )
         self.initial_dist_coeffs = np.zeros((5, 1), np.float32)
+    
+    @staticmethod
+    def calibrate_camera_worker(
+        model_points: np.ndarray,
+        target_points: np.ndarray,
+        image_size: Tuple[int, int],
+        calibration_matrix: np.ndarray,
+        dist_coeffs: np.ndarray):
         
-    def calibrate(self, target_data: List[TargetData], batch_size: int = 30, optim_iterations: int = 3, save: bool = False):
+        return cv2.calibrateCamera(
+            objectPoints=model_points,
+            imagePoints=target_points, 
+            imageSize=image_size, 
+            cameraMatrix=calibration_matrix, 
+            distCoeffs=dist_coeffs)
+    
+    def calibrate(self, target_datasets: List[TargetDataset], batch_size: int = 30, optim_iterations: int = 3, multiprocessing_workers: int = 16):
+        process_pool = Pool(multiprocessing_workers)
         
-        # generate target and initialize model points for each target
-        target_points = np.stack([target.target_points for target in target_data], axis=0)
-        num_target_points = len(target_data)
-        model_points = generate_model_points(self.calibration_target, num_target_points)
+        self.logger.info(f"intrinsics calibration: batch size = {batch_size}, iterations = {optim_iterations} on {multiprocessing_workers} workers ...")
         
         # run calibration
-        self.logger.info(f"intrinsics calibration: batch size = {batch_size}, iterations = {optim_iterations}")
-        avg_calibration_matrix = np.zeros_like(self.initial_calibration_matrix)
-        avg_dist_coeffs = np.zeros_like(self.initial_dist_coeffs)
-        avg_rmse = 0
-        for i in range(optim_iterations):
+        process_results = {ds.camera.name: [] for ds in target_datasets}
+        try:
+            for target_dataset in target_datasets:
             
-            # select batch
-            rand_batch_indexes = np.random.randint(num_target_points, size=batch_size)
-            model_points_batch = model_points[rand_batch_indexes, :, :]
-            target_points_batch = target_points[rand_batch_indexes, :, :]
+                # generate target and initialize model points for each target
+                target_data = target_dataset.target_data
+                target_points = np.stack([target.target_points for target in target_data], axis=0)
+                num_target_points = len(target_data)
+                
+                batches_indecies = [np.random.randint(num_target_points, size=batch_size) for _ in range(optim_iterations)]
+                model_points_batch = generate_model_points(self.target_parameters, batch_size).astype(np.float32)
+                target_points_batches = [target_points[batch_indexes].astype(np.float32) for batch_indexes in batches_indecies]
+                
+                
+                for batch in target_points_batches:
+                    # calibrate camera
+                    res_ = process_pool.apply_async(
+                        self.calibrate_camera_worker, 
+                        args = (
+                            model_points_batch,
+                            batch,
+                            self.capture_size,
+                            self.initial_calibration_matrix,
+                            self.initial_dist_coeffs
+                        ))
+                    process_results[target_dataset.camera.name].append(res_)
             
-            # calibrate camera
-            rmse, calibration_matrix_, dist_coeffs_, r_vecs, t_vecs = cv2.calibrateCamera(
-                objectPoints=model_points_batch, 
-                imagePoints=target_points_batch, 
-                imageSize=self.capture_size, 
-                cameraMatrix=self.initial_calibration_matrix, 
-                distCoeffs=self.initial_dist_coeffs)
+            # collect results
+            results = {}
+            for cam_name in process_results:
+                results[cam_name] = [res.get() for res in tqdm(process_results[cam_name], desc=f"calibrating {cam_name} intrinsics")]
             
-            avg_calibration_matrix += calibration_matrix_
-            avg_dist_coeffs += dist_coeffs_
-            avg_rmse += rmse
+        except Exception as e:
+            raise e
+        finally:
+            self.logger.info("closing process pool ...")
+            process_pool.close()
+            for cam_name in process_results:
+                for res in process_results[cam_name]:
+                    res.wait()
+            process_pool.join()
         
-        avg_calibration_matrix = avg_calibration_matrix / optim_iterations
-        avg_dist_coeffs = avg_dist_coeffs / optim_iterations
-        avg_rmse = avg_rmse / optim_iterations
         
-        self.logger.info(f"final average rmse = {avg_rmse}")
+        # format output
+        outputs = []
+        for ds in target_datasets:
+            
+            res = results[ds.camera.name]
+            
+            # results return in format: rmse, calibration_matrix_, dist_coeffs_, r_vecs, t_vecs
+            outputs.append(Intrinsics(
+                camera = ds.camera,
+                rmse = sum([res[0] for res in res]) / len(res),
+                calibration_matrix = sum([res[1] for res in res]) / len(res),
+                distortion_coefficients = np.sum([res[2].flatten() for res in res], axis=0) / len(res)
+            ))
         
-        intrinsic_calibration = ModelIntrinsics(
-            camera_name=self.camera.name,
-            rmse=avg_rmse,
-            calibration_matrix=avg_calibration_matrix,
-            distortion_coefficients=avg_dist_coeffs
-        )
+        return outputs
         
-        if save:
-            intrinsic_calibration.save_to_file(os.path.join(self.calibration_data_path, "calibration_intrinsics", f"{self.camera.name}.json"))
-            self.logger.info(f"saved calibration intrinsics for {self.camera.name}")
-        
-        return intrinsic_calibration
-        
-    def filter_targets(self, targets: List[TargetData], point_top_std_exclusion_percentle: float = 10, target_top_inverse_distance_exclusion_percentile: float = 20):
+    def filter_targets(self, target_dataset: TargetDataset, point_top_std_exclusion_percentle: float = 10, target_top_inverse_distance_exclusion_percentile: float = 20):
         
         # the targets are normalized locally to make their variance uniform over all targets
         # then the points with high variance for each target are flagged as outliers
-        normalised_patterns = np.stack([Z_norm(target.target_points) for target in targets], axis=0)
+        normalised_patterns = np.stack([Z_norm(target.target_points) for target in target_dataset.target_data], axis=0)
         per_point_std = np.sqrt((normalised_patterns - normalised_patterns.mean(axis=0))**2)
         top_std_percentile_threshold = np.percentile(per_point_std, (100 - point_top_std_exclusion_percentle), axis=0)
         valid_std_mask = per_point_std <= np.expand_dims(top_std_percentile_threshold, axis=0)
@@ -144,20 +174,19 @@ class IntrinsicsCalibrator:
             return
         self.logger.info(f"{len(targets)} valid targets after removing high per target mean std targets")
         
-        return targets
+        return TargetDataset(camera=target_dataset.camera, target_data=targets)
 
 
-class ExtrinsicsCalibrator:
+class ExtrinsicsCalibrationManager:
     
-    def __init__(self, cameras: List[CameraDevice], calibration_target: CalibrationTarget, capture_size: Tuple[int, int]):
+    def __init__(self, cameras: List[CameraDevice], target_parameters: TargetParameters, capture_size: Tuple[int, int]):
         self.logger = getLogger(self.__class__.__name__)
         
         self.cameras = cameras
-        self.calibration_target = calibration_target
+        self.target_parameters = target_parameters
         self.capture_size = capture_size
         
-        
-    def calibrate(self, camera_intrinsics: Dict[str, ModelIntrinsics], target_data: Dict[str, List[CalibrationTarget]], batch_size: int = 30, optim_iterations: int = 3):
+    def calibrate(self, camera_intrinsics: Dict[str, Intrinsics], target_data: TargetDataset, batch_size: int = 30, optim_iterations: int = 3):
         
         assert all([cam.name in camera_intrinsics for cam in self.cameras]), f"all cameras must have intrinsics referenced: expected {[cam.name for cam in self.cameras]}, got {camera_intrinsics.keys()}"
         assert all([cam.name in target_data for cam in self.cameras]), f"all cameras must have calibration targets referenced: expected {[cam.name for cam in self.cameras]}, got {target_data.keys()}"
@@ -182,7 +211,7 @@ class ExtrinsicsCalibrator:
         
         
         # prepare model points
-        model_points = generate_model_points(self.calibration_target, len(all_frames))
+        model_points = generate_model_points(self.target_parameters, len(all_frames))
         
         # calibrate extrinsics
         extrinsic_outputs = []
@@ -196,7 +225,7 @@ class ExtrinsicsCalibrator:
                 
                 # append inert transformation if from_camera == to_camera
                 if from_camera == to_camera:
-                    extrinsic_outputs.append(ModelExtrinsics(
+                    extrinsic_outputs.append(Extrinsics(
                         from_camera=from_camera.name,
                         to_camera=to_camera.name,
                         rmse=0,
@@ -217,7 +246,7 @@ class ExtrinsicsCalibrator:
                 avg_translation_vec = np.zeros((3, 1), np.float32)
                 avg_essential_mat = np.zeros((3, 3), np.float32)
                 avg_fundamental_mat = np.zeros((3, 3), np.float32)
-                for i in range(optim_iterations):
+                for i in tqdm(range(optim_iterations), desc=f"calibrating extrinsics {from_camera.name} -> {to_camera.name}", unit="iteration"):
                     
                     # select batch
                     rand_batch_indexes = np.random.randint(model_points.shape[0], size=batch_size)
@@ -250,7 +279,7 @@ class ExtrinsicsCalibrator:
                 fundamental_mat = avg_fundamental_mat / optim_iterations
                 self.logger.info(f"average rmse: {avg_rmse}")
                 
-                extrinsic_outputs.append(ModelExtrinsics(
+                extrinsic_outputs.append(Extrinsics(
                     from_camera=from_camera.name,
                     to_camera=to_camera.name,
                     rmse=rmse,

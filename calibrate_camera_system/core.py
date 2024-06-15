@@ -12,7 +12,26 @@ from device_capture_system.datamodel import CameraDevice, FramePreprocessing
 from device_capture_system.core import MultiInputStreamSender
 from device_capture_system.fileIO import ImageSaver
 
-from .datamodel import ModelExtrinsics, ModelIntrinsics
+from .datamodel import Extrinsics, Intrinsics
+
+
+
+# def remove_images_without_targets(self):
+#     valid_targets = {}
+#     for cam in self.cameras:
+#         self.logger.info(f"removing images without targets for {cam.name} ...")
+#         with open(os.path.join(self.calibration_save_path, f"{cam.name}.json"), "r") as f:
+#             all_targets = json.load(f, object_hook=decode_dict)
+#             for k in all_targets:
+#                 if all_targets[k] is None:
+#                     logger.info(f"{cam_uuid} :: {k} has no target, removing ...")
+#                     os.remove(k)
+#                 else:
+#                     valid_targets[k] = all_targets[k]
+#         # save updated list of targets
+#         with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "w") as f:
+#             json.dump(valid_targets, f, cls=NumpyEncoder)
+
 
 # --------------------- IMAGE IO ---------------------
 
@@ -46,7 +65,7 @@ class ImageManager:
             jpg_quality=100
         )
         
-    def collect_images(self, num_images_to_collect: int, frame_collection_interval: float = 0.1):
+    def collect_images(self, num_images_to_collect: int, frame_collection_interval: float = 0.1, max_error_frames: int = 25):
         
         try:
             self.image_saver.start()
@@ -55,8 +74,16 @@ class ImageManager:
             collected_frames = 0
             error_frames = 0
             while collected_frames < num_images_to_collect:
-                self.image_saver.save_image(datetime.now().timestamp())
+                correct = self.image_saver.save_image(datetime.now().timestamp())
                 sleep(frame_collection_interval)
+                if not correct:
+                    error_frames += 1
+                    self.logger.warning(f"issus saving frame exeting in {max_error_frames - error_frames} frames ...")
+                    if error_frames > max_error_frames:
+                        self.logger.error("too many errors, stopping image collection")
+                        break
+                collected_frames += 1
+                error_frames = 0
             
         except Exception as e:
             raise e
@@ -70,8 +97,8 @@ class CameraTransformer:
     def __init__(
         self, 
         cameras: List[CameraDevice],
-        camera_intrinsics: Dict[str, ModelIntrinsics],
-        camera_extrinsics: List[ModelExtrinsics]):
+        camera_intrinsics: Dict[str, Intrinsics],
+        camera_extrinsics: List[Extrinsics]):
         
         self.intrinsics = camera_intrinsics
         

@@ -1,4 +1,7 @@
 .venv
 __pycache__/
 .vscode/
-calibration_extrinsics.json
+calibration_data/extracted_targets.json
+
+dist/
+.pytest_cache/

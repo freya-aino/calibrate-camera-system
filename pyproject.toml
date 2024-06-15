@@ -10,7 +10,11 @@ packages = [{include = "calibrate_camera_system"}]
 python = "^3.10"
 opencv-python = "^4.8.1.78"
 device-capture-system = {path = "../device-capture-system/dist/device_capture_system-1.1.0.tar.gz"}
+tqdm = "^4.66.4"
 
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.2"
 
 [build-system]
 requires = ["poetry-core"]

@@ -1,7 +1,11 @@
+import os
 from json import load, dump, JSONEncoder
 from numpy import ndarray, array
 from pydantic import BaseModel, field_validator
-from typing import Enum, Tuple, Any, List
+from typing import Tuple, Any, List, Dict
+from enum import Enum
+
+from device_capture_system.datamodel import CameraDevice
 
 class NumpyJsonCodec(JSONEncoder):
     def default(self, obj):
@@ -21,14 +25,23 @@ class TargetType(Enum):
     # CIRCLES_GRID = "CIRCLES_GRID"
     # ASYMMETRIC_CIRCLES_GRID = "ASYMMETRIC_CIRCLES_GRID"
 
-class CalibrationTarget(BaseModel):
+class TargetParameters(BaseModel):
     target_type: TargetType
     num_target_corners_wh: Tuple[int, int] # (width, height) number of targets on the checkerboard
     target_size_wh_m: Tuple[float, float] # (width, height) of each target on the checkerboard in meters (m)
+    
+    @staticmethod
+    def load(target_parameter_dir: str, target_type: str):
+        with open(os.path.join(target_parameter_dir, target_type, "target.json"), "r") as f:
+            j_obj = load(f)
+            return TargetParameters(
+                target_type = TargetType(j_obj["target_type"].upper()),
+                num_target_corners_wh=tuple(j_obj["num_target_corners_wh"]),
+                target_size_wh_m=tuple(j_obj["target_size_wh_m"])
+            )
 
 class TargetData(BaseModel):
     image_name: str
-    camera_name: str
     target_points: Any
     
     @field_validator("target_points")
@@ -37,20 +50,35 @@ class TargetData(BaseModel):
             raise TypeError("target_points must be a numpy array")
         return value
 
-class ModelIntrinsics(BaseModel):
-    camera_name: str
+class TargetDataset(BaseModel):
+    camera: CameraDevice
+    target_data: List[TargetData]
+    
+    def save(self, file_path: str):
+        with open(os.path.join(file_path, f"{self.camera.name}.json"), "w") as f:
+            targets = [data.model_dump() for data in self.target_data]
+            dump(targets, f, cls=NumpyJsonCodec)
+    
+    @staticmethod
+    def load(file_path: str, camera: CameraDevice):
+        with open(os.path.join(file_path, f"{camera.name}.json"), "r") as f:
+            raw = load(f, object_hook=NumpyJsonCodec.decode_dict)
+        return TargetDataset(camera = camera, target_data = [TargetData(**data) for data in raw])
+
+class Intrinsics(BaseModel):
+    camera: CameraDevice
     rmse: float
     calibration_matrix: Any
     distortion_coefficients: Any
     
-    def save_to_file(self, file_path: str):
-        with open(file_path, "w") as f:
+    def save(self, file_path: str):
+        with open(os.path.join(file_path, f"{self.camera.name}.json"), "w") as f:
             dump(self.model_dump(), f, cls=NumpyJsonCodec)
-            
+    
     @staticmethod
-    def load_from_file(file_path: str):
-        with open(file_path, "r") as f:
-            return ModelIntrinsics(**load(f, object_hook=NumpyJsonCodec.decode_dict))
+    def load(file_path: str, camera: CameraDevice):
+        with open(os.path.join(file_path, f"{camera.name}.json"), "r") as f:
+            return Intrinsics(**load(f, object_hook=NumpyJsonCodec.decode_dict))
     
     @field_validator("calibration_matrix")
     def check_calibration_matrix(cls, value):
@@ -64,9 +92,7 @@ class ModelIntrinsics(BaseModel):
             raise TypeError("distortion_coefficients must be a numpy array")
         return value
 
-class ModelExtrinsics(BaseModel):
-    from_camera: str
-    to_camera: str
+class Extrinsics(BaseModel):
     rmse: float
     rotation_mat: Any
     translation_vec: Any
@@ -96,4 +122,12 @@ class ModelExtrinsics(BaseModel):
         if not isinstance(value, ndarray):
             raise TypeError("fundamental_matrix must be a numpy array")
         return value
-    
+
+
+# class CameraModel(BaseModel):
+#     camera: CameraDevice
+#     intrinsics: Intrinsics
+#     extrinsics: Dict[str, Extrinsics]
+
+
+
