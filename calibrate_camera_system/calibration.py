@@ -26,7 +26,7 @@ def generate_model_points(target_parameters: TargetParameters, num_target_points
 
 class IntrinsicsCalibrationManager:
     
-    def __init__(self, capture_size: Tuple[int, int], target_parameters: TargetParameters):
+    def __init__(self, target_parameters: TargetParameters, capture_size: Tuple[int, int]):
         self.logger = getLogger(self.__class__.__name__)
         
         self.target_parameters = target_parameters
@@ -176,118 +176,146 @@ class IntrinsicsCalibrationManager:
         
         return TargetDataset(camera=target_dataset.camera, target_data=targets)
 
-
 class ExtrinsicsCalibrationManager:
     
-    def __init__(self, cameras: List[CameraDevice], target_parameters: TargetParameters, capture_size: Tuple[int, int]):
+    def __init__(self, target_parameters: TargetParameters, capture_size: Tuple[int, int]):
         self.logger = getLogger(self.__class__.__name__)
         
-        self.cameras = cameras
+        # self.cameras = cameras
         self.target_parameters = target_parameters
         self.capture_size = capture_size
         
-    def calibrate(self, camera_intrinsics: Dict[str, Intrinsics], target_data: TargetDataset, batch_size: int = 30, optim_iterations: int = 3):
+        self.initial_rotation_mat = np.eye(3),
+        self.initial_translation_vec = np.zeros((3, 1), np.float32),
+        # self.initial_essential_mat = np.zeros((3, 3), np.float32),
+        # self.initial_fundamental_mat = np.zeros((3, 3), np.float32)
+    
+    def inner_join_datasets(self, target_datasets: List[TargetDataset]):
         
-        assert all([cam.name in camera_intrinsics for cam in self.cameras]), f"all cameras must have intrinsics referenced: expected {[cam.name for cam in self.cameras]}, got {camera_intrinsics.keys()}"
-        assert all([cam.name in target_data for cam in self.cameras]), f"all cameras must have calibration targets referenced: expected {[cam.name for cam in self.cameras]}, got {target_data.keys()}"
+        # collect points by image name
+        targets_by_image_name = {}
+        for ds in target_datasets:
+            for target in ds.target_data:
+                if target.image_name not in targets_by_image_name:
+                    targets_by_image_name[target.image_name] = {}
+                targets_by_image_name[target.image_name][ds.camera.name] = target
         
-        # load targets and change exclude targets that are not represented in all cameras
-        frames_by_image_id = {}
-        for cam in self.cameras:
-            for target in target_data[cam.name]:
-                if target.image_name not in frames_by_image_id:
-                    frames_by_image_id[target.image_name] = {}
-                frames_by_image_id[target.image_name][target.camera_name] = target.target_points
-        all_frames = []
-        for cam_frames in frames_by_image_id.values():
-            if len(cam_frames) != len(self.cameras):
+        # remove images without targets in all cameras
+        all_targtes = []
+        for frames_at_t in targets_by_image_name.values():
+            if len(frames_at_t) != len(target_datasets):
                 continue
-            all_frames.append(cam_frames)
-        all_valid_frames_by_cam = {}
-        for cam in self.cameras:
-            all_valid_frames_by_cam[cam.name] = np.array([cam_frame[cam.name] for cam_frame in all_frames], dtype=np.float32)
+            all_targtes.append(frames_at_t)
         
-        self.logger.info(f"found {len(all_frames)} frames with targets in all cameras")
+        # collect all frames by camera
+        output_datasets = []
+        for ds in target_datasets:
+            output_datasets.append(
+                TargetDataset(
+                    camera = ds.camera,
+                    target_data = [target[ds.camera.name] for target in all_targtes]
+                )
+            )
         
-        
-        # prepare model points
-        model_points = generate_model_points(self.target_parameters, len(all_frames))
+        return output_datasets
+    
+    @staticmethod
+    def calibrate_stereo_worker(
+        model_points: np.ndarray,
+        cam_from_target_points: np.ndarray,
+        cam_to_target_points: np.ndarray,
+        cam_from_intrinsics: Intrinsics,
+        cam_to_intrinsics: Intrinsics,
+        capture_size: Tuple[int, int]
+    ):
+        rmse, _, _, _, _, rot, trans, _, _ = cv2.stereoCalibrate(
+            objectPoints  = model_points,
+            imagePoints1  = cam_from_target_points,
+            imagePoints2  = cam_to_target_points,
+            imageSize     = capture_size,
+            cameraMatrix1 = cam_from_intrinsics.calibration_matrix,
+            distCoeffs1   = cam_from_intrinsics.distortion_coefficients,
+            cameraMatrix2 = cam_to_intrinsics.calibration_matrix,
+            distCoeffs2   = cam_to_intrinsics.distortion_coefficients,
+            flags=cv2.CALIB_FIX_INTRINSIC
+        )
+        return rmse, rot, trans
+    
+    def calibrate(self, target_datasets: List[TargetDataset], camera_intrinsics: List[Intrinsics], batch_size: int = 30, optim_iterations: int = 3, multiprocessing_workers: int = 16):
+        process_pool = Pool(multiprocessing_workers)
         
         # calibrate extrinsics
-        extrinsic_outputs = []
-        for from_camera in self.cameras:
+        process_results = {}
+        outputs = []
+        
+        try:
             
-            # get from_camera intrinsics
-            from_cam_matrix = camera_intrinsics[from_camera.name].calibration_matrix
-            from_cam_dist_coeffs = camera_intrinsics[from_camera.name].distortion_coefficients
+            camera_intrinsics_lut = {intrinsics.camera.name: intrinsics for intrinsics in camera_intrinsics}
+            inner_joined_datasets = self.inner_join_datasets(target_datasets)
             
-            for to_camera in self.cameras:
-                
-                # append inert transformation if from_camera == to_camera
-                if from_camera == to_camera:
-                    extrinsic_outputs.append(Extrinsics(
-                        from_camera=from_camera.name,
-                        to_camera=to_camera.name,
-                        rmse=0,
-                        rotation_mat=np.eye(3),
-                        translation_vec=np.zeros((3, 1), np.float32),
-                        essential_mat=np.zeros((3, 3), np.float32),
-                        fundamental_mat=np.zeros((3, 3), np.float32)
-                    ))
-                    continue
-                
-                # get to_camera intrinsics
-                to_cam_matrix = camera_intrinsics[to_camera.name].calibration_matrix
-                to_cam_dist_coeffs = camera_intrinsics[to_camera.name].distortion_coefficients
-                
-                self.logger.info(f"stereo calibrating {from_camera.name} with camera {to_camera.name} stereo with {batch_size} samples per iteration for {optim_iterations} iterations ...")
-                avg_rmse = 0
-                avg_rotation_mat = np.zeros((3, 3), np.float32)
-                avg_translation_vec = np.zeros((3, 1), np.float32)
-                avg_essential_mat = np.zeros((3, 3), np.float32)
-                avg_fundamental_mat = np.zeros((3, 3), np.float32)
-                for i in tqdm(range(optim_iterations), desc=f"calibrating extrinsics {from_camera.name} -> {to_camera.name}", unit="iteration"):
+            self.logger.info(f"calibrating extrinsics: batch size = {batch_size}, iterations = {optim_iterations} on {multiprocessing_workers} workers ...")
+            self.logger.info(f"number of datapoints with points in all cameras: {len(inner_joined_datasets[0].target_data)}")
+            
+            model_points = generate_model_points(self.target_parameters, batch_size)
+            
+            for camera_from_dataset in inner_joined_datasets:
+                for camera_to_dataset in inner_joined_datasets:
                     
-                    # select batch
-                    rand_batch_indexes = np.random.randint(model_points.shape[0], size=batch_size)
-                    model_points_batch = model_points[rand_batch_indexes, :, :]
-                    from_cam_target_points_batch = all_valid_frames_by_cam[from_camera.name][rand_batch_indexes, :, :]
-                    to_cam_points_batch = all_valid_frames_by_cam[to_camera.name][rand_batch_indexes, :, :]
+                    # if same camera append null transformation
+                    if camera_from_dataset.camera is camera_to_dataset.camera:
+                        outputs.append(Extrinsics(
+                            camera_from = camera_from_dataset.camera,
+                            camera_to = camera_to_dataset.camera,
+                            rmse = 0,
+                            rotation_matrix = self.initial_rotation_mat,
+                            translation_vector = self.initial_translation_vec,
+                            # essential_mat=self.initial_essential_mat,
+                            # fundamental_mat=self.initial_fundamental_mat
+                        ))
+                        continue
                     
-                    rmse, _, _, _, _, r, t, e, f = cv2.stereoCalibrate(
-                        objectPoints=model_points_batch,
-                        imagePoints1=from_cam_target_points_batch,
-                        imagePoints2=to_cam_points_batch,
-                        imageSize=self.capture_size,
-                        cameraMatrix1=from_cam_matrix,
-                        distCoeffs1=from_cam_dist_coeffs,
-                        cameraMatrix2=to_cam_matrix,
-                        distCoeffs2=to_cam_dist_coeffs,
-                        flags=cv2.CALIB_FIX_INTRINSIC
+                    
+                    batches_indicies = [np.random.randint(len(camera_from_dataset.target_data), size=batch_size) for _ in range(optim_iterations)]
+                    camera_from_batches = [camera_from_dataset.target_data[batch_size].astype(np.float32) for batch_size in batches_indicies]
+                    camera_to_batches = [camera_to_dataset.target_data[batch_size].astype(np.float32) for batch_size in batches_indicies]
+                    
+                    for i in range(optim_iterations):
+                        res_ = process_pool.apply_async(
+                            self.calibrate_stereo_worker,
+                            args = (
+                                model_points,
+                                camera_from_batches[i],
+                                camera_to_batches[i],
+                                camera_intrinsics_lut[camera_from_dataset.camera.name],
+                                camera_intrinsics_lut[camera_to_dataset.camera.name],
+                                self.capture_size
+                            ))
+                        process_results[(camera_from_dataset.camera.name, camera_to_dataset.camera.name)].append(res_)
+                    
+            
+            # collect results and format into Extrinsics
+            for k in process_results:
+                results = [res.get() for res in tqdm(process_results[k], desc=f"calibrating extrinsics {k}")]
+                
+                # results return in format: rmse, rotation_mat, translation_vec
+                outputs.append(
+                    Extrinsics(
+                        camera_from = camera_intrinsics_lut[k[0]].camera,
+                        camera_to = camera_intrinsics_lut[k[1]].camera,
+                        rmse = sum([res[0] for res in results]) / len(results),
+                        rotation_matrix = sum([res[1] for res in results]) / len(results),
+                        translation_vector = sum([res[2] for res in results]) / len(results)
                     )
-                    
-                    avg_rmse += rmse
-                    avg_rotation_mat += r
-                    avg_translation_vec += t
-                    avg_essential_mat += e
-                    avg_fundamental_mat += f
-                
-                rmse = avg_rmse / optim_iterations
-                rotation_mat = avg_rotation_mat / optim_iterations
-                translation_vec = avg_translation_vec / optim_iterations
-                essential_mat = avg_essential_mat / optim_iterations
-                fundamental_mat = avg_fundamental_mat / optim_iterations
-                self.logger.info(f"average rmse: {avg_rmse}")
-                
-                extrinsic_outputs.append(Extrinsics(
-                    from_camera=from_camera.name,
-                    to_camera=to_camera.name,
-                    rmse=rmse,
-                    rotation_mat=rotation_mat,
-                    translation_vec=translation_vec,
-                    essential_mat=essential_mat,
-                    fundamental_mat=fundamental_mat
-                ))
+                )
             
-        self.logger.info("calibrating extrinsics complete!")
-        return extrinsic_outputs
+        except Exception as e:
+            raise e
+        finally:
+            self.logger.info("closing process pool ...")
+            process_pool.close()
+            for k in process_results:
+                for res in process_results[k]:
+                    res.wait()
+            process_pool.join()
+        
+        return outputs

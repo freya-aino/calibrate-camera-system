@@ -93,11 +93,22 @@ class Intrinsics(BaseModel):
         return value
 
 class Extrinsics(BaseModel):
+    camera_from: CameraDevice
+    camera_to: CameraDevice
     rmse: float
-    rotation_mat: Any
-    translation_vec: Any
-    essential_mat: Any
-    fundamental_mat: Any
+    rotation_matrix: Any
+    translation_vector: Any
+    # essential_mat: Any
+    # fundamental_mat: Any
+    
+    def save(self, file_path: str):
+        with open(os.path.join(file_path, f"{self.camera_from.name}-{self.camera_to.name}.json"), "w") as f:
+            dump(self.model_dump(), f, cls=NumpyJsonCodec)
+    
+    @staticmethod
+    def load(file_path: str, camera_from: CameraDevice, camera_to: CameraDevice):
+        with open(os.path.join(file_path, f"{camera_from.name}-{camera_to.name}.json"), "r") as f:
+            return Extrinsics(**load(f, object_hook=NumpyJsonCodec.decode_dict))
     
     @field_validator("rotation_mat")
     def check_rotation_matrix(cls, value):
@@ -111,17 +122,17 @@ class Extrinsics(BaseModel):
             raise TypeError("translation_vector must be a numpy array")
         return value
     
-    @field_validator("essential_mat")
-    def check_essential_matrix(cls, value):
-        if not isinstance(value, ndarray):
-            raise TypeError("essential_matrix must be a numpy array")
-        return value
+    # @field_validator("essential_mat")
+    # def check_essential_matrix(cls, value):
+    #     if not isinstance(value, ndarray):
+    #         raise TypeError("essential_matrix must be a numpy array")
+    #     return value
     
-    @field_validator("fundamental_mat")
-    def check_fundamental_matrix(cls, value):
-        if not isinstance(value, ndarray):
-            raise TypeError("fundamental_matrix must be a numpy array")
-        return value
+    # @field_validator("fundamental_mat")
+    # def check_fundamental_matrix(cls, value):
+    #     if not isinstance(value, ndarray):
+    #         raise TypeError("fundamental_matrix must be a numpy array")
+    #     return value
 
 
 # class CameraModel(BaseModel):
