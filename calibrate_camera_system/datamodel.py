@@ -110,13 +110,13 @@ class Extrinsics(BaseModel):
         with open(os.path.join(file_path, f"{camera_from.name}-{camera_to.name}.json"), "r") as f:
             return Extrinsics(**load(f, object_hook=NumpyJsonCodec.decode_dict))
     
-    @field_validator("rotation_mat")
+    @field_validator("rotation_matrix")
     def check_rotation_matrix(cls, value):
         if not isinstance(value, ndarray):
             raise TypeError("rotation_matrix must be a numpy array")
         return value
     
-    @field_validator("translation_vec")
+    @field_validator("translation_vector")
     def check_translation_vector(cls, value):
         if not isinstance(value, ndarray):
             raise TypeError("translation_vector must be a numpy array")

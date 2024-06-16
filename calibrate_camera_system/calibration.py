@@ -59,7 +59,7 @@ class IntrinsicsCalibrationManager:
             cameraMatrix=calibration_matrix, 
             distCoeffs=dist_coeffs)
     
-    def calibrate(self, target_datasets: List[TargetDataset], batch_size: int = 30, optim_iterations: int = 3, multiprocessing_workers: int = 16):
+    def calibrate(self, target_datasets: List[TargetDataset], batch_size: int = 30, optim_iterations: int = 3, multiprocessing_workers: int = 12):
         process_pool = Pool(multiprocessing_workers)
         
         self.logger.info(f"intrinsics calibration: batch size = {batch_size}, iterations = {optim_iterations} on {multiprocessing_workers} workers ...")
@@ -126,6 +126,8 @@ class IntrinsicsCalibrationManager:
         
     def filter_targets(self, target_dataset: TargetDataset, point_top_std_exclusion_percentle: float = 10, target_top_inverse_distance_exclusion_percentile: float = 20):
         
+        targets = target_dataset.target_data
+        
         # the targets are normalized locally to make their variance uniform over all targets
         # then the points with high variance for each target are flagged as outliers
         normalised_patterns = np.stack([Z_norm(target.target_points) for target in target_dataset.target_data], axis=0)
@@ -185,37 +187,36 @@ class ExtrinsicsCalibrationManager:
         self.target_parameters = target_parameters
         self.capture_size = capture_size
         
-        self.initial_rotation_mat = np.eye(3),
-        self.initial_translation_vec = np.zeros((3, 1), np.float32),
-        # self.initial_essential_mat = np.zeros((3, 3), np.float32),
+        self.initial_rotation_mat = np.eye(3)
+        self.initial_translation_vec = np.zeros((3, 1), np.float32)
+        # self.initial_essential_mat = np.zeros((3, 3), np.float32)
         # self.initial_fundamental_mat = np.zeros((3, 3), np.float32)
     
-    def inner_join_datasets(self, target_datasets: List[TargetDataset]):
+    def inner_join_datasets_and_format(self, target_datasets: List[TargetDataset]):
         
         # collect points by image name
-        targets_by_image_name = {}
+        target_points_by_image_name = {}
         for ds in target_datasets:
             for target in ds.target_data:
-                if target.image_name not in targets_by_image_name:
-                    targets_by_image_name[target.image_name] = {}
-                targets_by_image_name[target.image_name][ds.camera.name] = target
+                if target.image_name not in target_points_by_image_name:
+                    target_points_by_image_name[target.image_name] = {}
+                target_points_by_image_name[target.image_name][ds.camera.name] = target.target_points
         
         # remove images without targets in all cameras
-        all_targtes = []
-        for frames_at_t in targets_by_image_name.values():
+        all_targets_points = []
+        for frames_at_t in target_points_by_image_name.values():
             if len(frames_at_t) != len(target_datasets):
                 continue
-            all_targtes.append(frames_at_t)
+            all_targets_points.append(frames_at_t)
         
         # collect all frames by camera
         output_datasets = []
         for ds in target_datasets:
             output_datasets.append(
-                TargetDataset(
-                    camera = ds.camera,
-                    target_data = [target[ds.camera.name] for target in all_targtes]
-                )
-            )
+                {
+                    "camera": ds.camera,
+                    "target_data": np.stack([target[ds.camera.name] for target in all_targets_points], axis=0)
+                })
         
         return output_datasets
     
@@ -251,10 +252,10 @@ class ExtrinsicsCalibrationManager:
         try:
             
             camera_intrinsics_lut = {intrinsics.camera.name: intrinsics for intrinsics in camera_intrinsics}
-            inner_joined_datasets = self.inner_join_datasets(target_datasets)
+            inner_joined_datasets = self.inner_join_datasets_and_format(target_datasets)
             
             self.logger.info(f"calibrating extrinsics: batch size = {batch_size}, iterations = {optim_iterations} on {multiprocessing_workers} workers ...")
-            self.logger.info(f"number of datapoints with points in all cameras: {len(inner_joined_datasets[0].target_data)}")
+            self.logger.info(f"number of datapoints with points in all cameras: {len(inner_joined_datasets[0]['target_data'])}")
             
             model_points = generate_model_points(self.target_parameters, batch_size)
             
@@ -262,22 +263,23 @@ class ExtrinsicsCalibrationManager:
                 for camera_to_dataset in inner_joined_datasets:
                     
                     # if same camera append null transformation
-                    if camera_from_dataset.camera is camera_to_dataset.camera:
-                        outputs.append(Extrinsics(
-                            camera_from = camera_from_dataset.camera,
-                            camera_to = camera_to_dataset.camera,
-                            rmse = 0,
-                            rotation_matrix = self.initial_rotation_mat,
-                            translation_vector = self.initial_translation_vec,
-                            # essential_mat=self.initial_essential_mat,
-                            # fundamental_mat=self.initial_fundamental_mat
-                        ))
+                    if camera_from_dataset["camera"] is camera_to_dataset["camera"]:
+                        outputs.append(
+                            Extrinsics(
+                                camera_from = camera_from_dataset["camera"],
+                                camera_to = camera_to_dataset["camera"],
+                                rmse = 0,
+                                rotation_matrix = self.initial_rotation_mat,
+                                translation_vector = self.initial_translation_vec,
+                                # essential_mat=self.initial_essential_mat,
+                                # fundamental_mat=self.initial_fundamental_mat
+                            ))
                         continue
                     
+                    batches_indicies = [np.random.randint(camera_from_dataset["target_data"].shape[0], size=batch_size) for _ in range(optim_iterations)]
                     
-                    batches_indicies = [np.random.randint(len(camera_from_dataset.target_data), size=batch_size) for _ in range(optim_iterations)]
-                    camera_from_batches = [camera_from_dataset.target_data[batch_size].astype(np.float32) for batch_size in batches_indicies]
-                    camera_to_batches = [camera_to_dataset.target_data[batch_size].astype(np.float32) for batch_size in batches_indicies]
+                    camera_from_batches = [camera_from_dataset["target_data"][batch_i].astype(np.float32) for batch_i in batches_indicies]
+                    camera_to_batches = [camera_to_dataset["target_data"][batch_i].astype(np.float32) for batch_i in batches_indicies]
                     
                     for i in range(optim_iterations):
                         res_ = process_pool.apply_async(
@@ -286,16 +288,19 @@ class ExtrinsicsCalibrationManager:
                                 model_points,
                                 camera_from_batches[i],
                                 camera_to_batches[i],
-                                camera_intrinsics_lut[camera_from_dataset.camera.name],
-                                camera_intrinsics_lut[camera_to_dataset.camera.name],
+                                camera_intrinsics_lut[camera_from_dataset["camera"].name],
+                                camera_intrinsics_lut[camera_to_dataset["camera"].name],
                                 self.capture_size
                             ))
-                        process_results[(camera_from_dataset.camera.name, camera_to_dataset.camera.name)].append(res_)
+                        key = (camera_from_dataset["camera"].name, camera_to_dataset["camera"].name)
+                        if key not in process_results:
+                            process_results[key] = []
+                        process_results[key].append(res_)
                     
             
             # collect results and format into Extrinsics
             for k in process_results:
-                results = [res.get() for res in tqdm(process_results[k], desc=f"calibrating extrinsics {k}")]
+                results = [res.get() for res in tqdm(process_results[k], desc=f"calibrating  extrinsics {k}")]
                 
                 # results return in format: rmse, rotation_mat, translation_vec
                 outputs.append(
@@ -303,8 +308,8 @@ class ExtrinsicsCalibrationManager:
                         camera_from = camera_intrinsics_lut[k[0]].camera,
                         camera_to = camera_intrinsics_lut[k[1]].camera,
                         rmse = sum([res[0] for res in results]) / len(results),
-                        rotation_matrix = sum([res[1] for res in results]) / len(results),
-                        translation_vector = sum([res[2] for res in results]) / len(results)
+                        rotation_matrix = np.sum([res[1] for res in results], axis=0) / len(results),
+                        translation_vector = np.sum([res[2] for res in results], axis=0) / len(results)
                     )
                 )
             
