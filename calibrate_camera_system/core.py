@@ -2,6 +2,7 @@ import os
 import numpy as np
 import cv2
 
+from copy import deepcopy
 from datetime import datetime
 from logging import getLogger
 from time import sleep
@@ -11,26 +12,7 @@ from device_capture_system.datamodel import CameraDevice, FramePreprocessing
 from device_capture_system.core import MultiInputStreamSender
 from device_capture_system.fileIO import ImageSaver
 
-from .datamodel import Extrinsics, Intrinsics
-
-
-
-# def remove_images_without_targets(self):
-#     valid_targets = {}
-#     for cam in self.cameras:
-#         self.logger.info(f"removing images without targets for {cam.name} ...")
-#         with open(os.path.join(self.calibration_save_path, f"{cam.name}.json"), "r") as f:
-#             all_targets = json.load(f, object_hook=decode_dict)
-#             for k in all_targets:
-#                 if all_targets[k] is None:
-#                     logger.info(f"{cam_uuid} :: {k} has no target, removing ...")
-#                     os.remove(k)
-#                 else:
-#                     valid_targets[k] = all_targets[k]
-#         # save updated list of targets
-#         with open(os.path.join("calibration_targets", f"{cam_uuid}.json"), "w") as f:
-#             json.dump(valid_targets, f, cls=NumpyEncoder)
-
+from .datamodel import CameraModelInformation, Intrinsics, TargetDataset
 
 # --------------------- IMAGE IO ---------------------
 
@@ -39,15 +21,14 @@ class ImageManager:
     def __init__(
         self, 
         cameras: List[CameraDevice],
-        calibration_data_path: str = "./calibration_data",
+        image_save_path: str,
         frame_preprocessings: List[FramePreprocessing] = [],
         proxy_pub_port: int = 10000,
         proxy_sub_port: int = 10001):
         
         self.logger = getLogger(self.__class__.__name__)
         
-        self.cameras = cameras
-        image_save_path = os.path.join(calibration_data_path, "images")
+        self.image_save_path = image_save_path
         
         self.multi_stream_sender = MultiInputStreamSender(
             devices=cameras,
@@ -63,6 +44,16 @@ class ImageManager:
             output_path=image_save_path,
             jpg_quality=100
         )
+        
+    def remove_images_without_targets(self, target_datasets: List[TargetDataset]):
+        for target_dataset in target_datasets:
+            valid_image_names = {target_data.image_name: None for target_data in target_dataset.target_data}
+            target_ds_folder_path = os.path.join(self.image_save_path, target_dataset.camera.name)
+            for image_name in os.listdir(target_ds_folder_path):
+                if image_name in valid_image_names:
+                    continue
+                os.remove(os.path.join(target_ds_folder_path, image_name))
+                self.logger.info(f"removed image without target: {target_dataset.camera.name}/{image_name}")
         
     def collect_images(self, num_images_to_collect: int, frame_collection_interval: float = 0.1, max_error_frames: int = 25):
         
@@ -93,60 +84,87 @@ class ImageManager:
 # --------------------- CAMERA TRANSFORMER ---------------------
 
 
-
-
-class CameraTransformer:
-    def __init__(self, camera_intrinsics: List[Intrinsics], camera_extrinsics: List[Extrinsics]):
+class CameraModel:
+    def __init__(self, camera_model_information: CameraModelInformation):
         self.logger = getLogger(self.__class__.__name__)
         
-        self.intrinsics = camera_intrinsics
-        
+        # put intrinsics and extrinsics in a dictionary for easy access
+        self.intrinsics = {I.camera.name: I for I in camera_model_information.intrinsics}
         ext = {}
-        for extrinsic in camera_extrinsics:
-            if extrinsic.camera_from not in ext:
-                ext[extrinsic.camera_from] = {}
-            ext[extrinsic.camera_from][extrinsic.camera_to] = extrinsic
+        for extrinsic in camera_model_information.extrinsics:
+            cam_from_name = extrinsic.camera_from.name
+            cam_to_name = extrinsic.camera_to.name
+            if cam_from_name not in ext:
+                ext[cam_from_name] = {}
+            ext[cam_from_name][cam_to_name] = extrinsic
         
-        self.projection_matricies = {}
-        for cam_from in ext:
-            for cam_to in ext[cam_from]:
-                rot_mat = ext[cam_from.name][cam_to.name].rotation_mat
-                trans_vec = ext[cam_from.name][cam_to.name].translation_vec
-                self.projection_matricies[cam_from.name][cam_to.name] = self.intrinsics[cam_from.name].calibration_matrix @ np.concatenate([rot_mat, trans_vec], axis=1)
-                
-        print("projection matricies", self.projection_matricies)
-        
+        # calculate projection matrices
+        self.projection_matrices = {}
+        for cam_from_name in ext:
+            self.projection_matrices[cam_from_name] = {}
+            for cam_to_name in ext[cam_from_name]:
+                rot_mat = ext[cam_from_name][cam_to_name].rotation_matrix
+                trans_vec = ext[cam_from_name][cam_to_name].translation_vector.reshape(3, 1)
+                self.projection_matrices[cam_from_name][cam_to_name] = self.intrinsics[cam_from_name].calibration_matrix @ np.concatenate([rot_mat, trans_vec], axis=1)
         
     def undistort_points(self, points: np.ndarray, intrinsics: Intrinsics):
         return cv2.undistortPoints(src = points, cameraMatrix = intrinsics.calibration_matrix, distCoeffs = intrinsics.distortion_coefficients)
     
     def triangulate_points(self, points_from: np.ndarray, points_to: np.ndarray, cam_from_name: str, cam_to_name: str):
         points_4D = cv2.triangulatePoints(
-            projMatr1 = self.projection_matricies[cam_from_name][cam_to_name],
-            projMatr2 = self.projection_matricies[cam_to_name][cam_from_name],
+            projMatr1 = self.projection_matrices[cam_from_name][cam_to_name],
+            projMatr2 = self.projection_matrices[cam_to_name][cam_from_name],
             projPoints1 = points_from,
             projPoints2 = points_to
         )
         # to homogeneous coordinates and return
         return points_4D[:3] / points_4D[3]
     
-    def process_points(self, points: dict[str, np.ndarray], main_cam_name: str):
+    def project_points(self, points: dict[str, np.ndarray], main_cam_name: str):
+        points = deepcopy(points)
         
         # undistort all points
-        for cam_name, point in points.items():
-            points[cam_name] = self.undistort_points(point, self.intrinsics[cam_name])
+        for cam_name, points_ in points.items():
+            points_ = points_.reshape(-1, 1, 2)
+            points[cam_name] = self.undistort_points(points_, self.intrinsics[cam_name])
         
         # triangulate all points relative to main camera
-        output_3D_points = []
-        for cam_name, point in points.items():
+        output_3D_points = {}
+        for cam_name, points_ in points.items():
             if cam_name == main_cam_name:
                 continue
-            output_3D_points.append(
-                self.triangulate_points(
-                    points_from = points[cam_name], 
-                    points_to = points[main_cam_name],
+            points_from = points_.reshape(-1, 2).T
+            points_to = points[main_cam_name].reshape(-1, 2).T
+            
+            output_3D_points[cam_name] = self.triangulate_points(
+                    points_from = points_from, 
+                    points_to = points_to,
                     cam_from_name = cam_name,
-                    cam_to_name = main_cam_name
-                )
-            )
+                    cam_to_name = main_cam_name).T
+        return output_3D_points
+    
+    def reproject_points(self, points_3D: np.ndarray, cam_from_name: str, cam_to_name: str):
+        # Project 3D points onto the 2D plane of the specified camera
+        points_3D = points_3D.T
         
+        homogeneous_points = np.vstack((points_3D, np.ones((1, points_3D.shape[1]))))
+        
+        points_2D = self.projection_matrices[cam_from_name][cam_to_name] @ homogeneous_points
+        
+        # Convert to non-homogeneous coordinates
+        points_2D = points_2D[:2] / points_2D[2]
+        
+        # rvec, _ = cv2.Rodrigues(self.projection_matrices[cam_from_name][cam_to_name][:3, :3])
+        # tvec = self.projection_matrices[cam_from_name][cam_to_name][:3, 3].reshape(3, 1)
+        # camera_mat = self.intrinsics[cam_to_name].calibration_matrix
+        # dist_coeffs = self.intrinsics[cam_to_name].distortion_coefficients
+        
+        # points_2D, e = cv2.projectPoints(
+        #     objectPoints = points_3D,
+        #     rvec = rvec,
+        #     tvec = tvec,
+        #     cameraMatrix = camera_mat,
+        #     distCoeffs = dist_coeffs
+        # )
+        
+        return points_2D.T
