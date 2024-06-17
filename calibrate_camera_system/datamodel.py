@@ -134,11 +134,13 @@ class Extrinsics(BaseModel):
     #         raise TypeError("fundamental_matrix must be a numpy array")
     #     return value
 
-
 # class CameraModel(BaseModel):
-#     camera: CameraDevice
-#     intrinsics: Intrinsics
-#     extrinsics: Dict[str, Extrinsics]
-
-
-
+#     main_camera: CameraDevice
+#     intrinsics: List[Intrinsics]
+#     extrinsics: []
+    
+#     @staticmethod
+#     def load(intrinsics_save_path: str, extrinsics_save_path: str, main_camera: CameraDevice):
+#         intrinsics = [Intrinsics.load(intrinsics_save_path, camera) for camera in main_camera]
+#         extrinsics = [Extrinsics.load(extrinsics_save_path, camera) for camera in main_camera]
+#         return CameraModel(main_camera=main_camera, intrinsics=intrinsics, extrinsics=extrinsics)

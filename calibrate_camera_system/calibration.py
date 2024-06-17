@@ -188,9 +188,7 @@ class ExtrinsicsCalibrationManager:
         self.capture_size = capture_size
         
         self.initial_rotation_mat = np.eye(3)
-        self.initial_translation_vec = np.zeros((3, 1), np.float32)
-        # self.initial_essential_mat = np.zeros((3, 3), np.float32)
-        # self.initial_fundamental_mat = np.zeros((3, 3), np.float32)
+        self.initial_translation_vec = np.zeros((3), np.float32)
     
     def inner_join_datasets_and_format(self, target_datasets: List[TargetDataset]):
         
@@ -240,7 +238,7 @@ class ExtrinsicsCalibrationManager:
             distCoeffs2   = cam_to_intrinsics.distortion_coefficients,
             flags=cv2.CALIB_FIX_INTRINSIC
         )
-        return rmse, rot, trans
+        return rmse, rot, trans.flatten()
     
     def calibrate(self, target_datasets: List[TargetDataset], camera_intrinsics: List[Intrinsics], batch_size: int = 30, optim_iterations: int = 3, multiprocessing_workers: int = 16):
         process_pool = Pool(multiprocessing_workers)
@@ -270,9 +268,7 @@ class ExtrinsicsCalibrationManager:
                                 camera_to = camera_to_dataset["camera"],
                                 rmse = 0,
                                 rotation_matrix = self.initial_rotation_mat,
-                                translation_vector = self.initial_translation_vec,
-                                # essential_mat=self.initial_essential_mat,
-                                # fundamental_mat=self.initial_fundamental_mat
+                                translation_vector = self.initial_translation_vec
                             ))
                         continue
                     
