@@ -144,7 +144,5 @@ class CameraModelInformation(BaseModel):
         extrinsics = []
         for camera_from in cameras:
             for camera_to in cameras:
-                if camera_from == camera_to:
-                    continue
                 extrinsics.append(Extrinsics.load(extrinsics_save_path, camera_from, camera_to))
         return CameraModelInformation(intrinsics=intrinsics, extrinsics=extrinsics)

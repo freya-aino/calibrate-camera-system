@@ -27,10 +27,11 @@ arg_parser.add_argument("--find-targets", action="store_true")
 
 arg_parser.add_argument("--calibrate-intrinsics", action="store_true")
 arg_parser.add_argument("--calibrate-extrinsics", action="store_true")
-arg_parser.add_argument("--calibration-iterations", type=int, default=10)
+arg_parser.add_argument("--calibration-iterations", type=int, default=100, help="number of iterations for calibration optimization, has to be > 1")
 arg_parser.add_argument("--calibration-batch-size", type=int, default=30)
-arg_parser.add_argument("--point-top-std-exclusion-percentle", type=float, default=30)
-arg_parser.add_argument("--target-top-inverse-distance-exclusion-percentile", type=float, default=30)
+arg_parser.add_argument("--point-top-std-exclusion-percentle", type=float, default=10)
+arg_parser.add_argument("--target-top-inverse-distance-exclusion-percentile", type=float, default=20)
+arg_parser.add_argument("--high-rmse-cutoff-percentile", type=float, default=20, help="cutoff percentile for high rmse error in calibration")
 
 arg_parser.add_argument("--remove-images-without-targets", action="store_true", help="remove images without targets after calibration")
 
@@ -84,6 +85,9 @@ if __name__ == "__main__":
     # load camera devices and calibration target parameters
     cameras = load_all_devices_from_config("video", config_file="./devices.json")
     target_parameters = TargetParameters.load(TARGET_PARAMETER_PATH, target_type=TARGET_TYPE)
+    # turn target size from m to mm
+    target_parameters.target_size_wh_m = (target_parameters.target_size_wh_m[0] * 1000, target_parameters.target_size_wh_m[1] * 1000)
+    
     
     # instantiate managers
     image_manager = ImageManager(cameras=cameras, image_save_path=IMAGE_SAVE_PATH, frame_preprocessings=FRAME_PREPROCESSINGS)
@@ -138,7 +142,8 @@ if __name__ == "__main__":
         calibration_intrinsics = intrinsics_calibration_manager.calibrate(
             target_datasets=target_datasets,
             batch_size = ARGS.calibration_batch_size,
-            optim_iterations = ARGS.calibration_iterations
+            optim_iterations = ARGS.calibration_iterations,
+            high_rmse_cutoff_percentile=ARGS.high_rmse_cutoff_percentile
         )
         for intrinsics in calibration_intrinsics:
             intrinsics.save(INTRINSICS_SAVE_PATH)
@@ -167,7 +172,8 @@ if __name__ == "__main__":
             target_datasets=target_datasets,
             camera_intrinsics=calibration_intrinsics,
             batch_size=ARGS.calibration_batch_size,
-            optim_iterations=ARGS.calibration_iterations
+            optim_iterations=ARGS.calibration_iterations,
+            high_rmse_cutoff_percentile=ARGS.high_rmse_cutoff_percentile
         )
         for extrinsic in extrinsics:
             extrinsic.save(EXTRINSICS_SAVE_PATH)
@@ -240,43 +246,74 @@ if __name__ == "__main__":
         
         
         
-        main_cam = cameras[0]
-        aux_cam = cameras[2] # for visualization
+        cam_from = cameras[2]
+        # cam_from_2 = cameras[1]
+        cam_to = cameras[0]
         
         
-        rmse = 0
-        for target in filtered_target_wise_points:
-            image_name, points_2D = target["image_name"], target["target_points"]
-            
-            world_points = cam_model.project_to_world(points_2D[main_cam.name], main_cam.name, aux_cam.name)
-            reconstructed_points = cam_model.project_to_camera(world_points, main_cam.name, main_cam.name)
-            
-            rmse += np.sqrt(((points_2D[aux_cam.name] - reconstructed_points)**2).mean(axis=0))
-        print(f"RMSE ({main_cam.name} -> {aux_cam.name}): {rmse / len(filtered_target_wise_points)}")
-        
-        exit()
+        def rmse(a, b):
+            return np.sqrt(((a - b)**2).mean(axis=0))
         
         for target in random.sample(filtered_target_wise_points, 10):
             image_name, points_2D = target["image_name"], target["target_points"]
+            points_2D_from = points_2D[cam_from.name]
+            points_2D_to = points_2D[cam_to.name]
+            # points_2D_from_2 = points_2D[cam_from_2.name]
             
-            print(points_2D[main_cam.name])
+            undistorted_points_2D_from = cam_model.undistort_points(points_2D_from, cam_from.name)
+            undistorted_points_2D_to = cam_model.undistort_points(points_2D_to, cam_to.name)
             
-            world_points = cam_model.project_to_world(points_2D[main_cam.name], main_cam.name, aux_cam.name)
+            tri_points = cam_model.triangulate_points(points_2D_from, points_2D_to, cam_from.name, cam_to.name)
+            # tri_points = cam_model.project_to_world(points_2D_from, cam_from.name, cam_to.name)
             
-            print(world_points)
+            # rep_points = cam_model.project_to_camera(tri_points, cam_from.name, cam_to.name)
+            # rep_points_original = cam_model.project_to_camera(tri_points, cam_from.name, cam_from.name)
+            rep_points = cam_model.project_points_to_view(tri_points, cam_from.name, cam_to.name)
+            rep_points_original = cam_model.project_points_to_view(tri_points, cam_from.name, cam_from.name)
             
-            reconstructed_points = cam_model.project_to_camera(world_points, main_cam.name, aux_cam.name)
+            print(tri_points)
+            print(rep_points)
+            print(rep_points_original)
             
-            print(reconstructed_points)
+            print(f"rmse original: {rmse(undistorted_points_2D_from, rep_points_original)}")
+            print(f"rmse reprojected: {rmse(undistorted_points_2D_to, rep_points)}")
+            
             
             # visualize image and points
-            image = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{aux_cam.name}", f"{image_name}"))
+            image_from = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{cam_from.name}", f"{image_name}"))
+            image_to = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{cam_to.name}", f"{image_name}"))
             
-            for point in points_2D[aux_cam.name]:
-                cv2.circle(image, tuple(map(int, point)), 5, (0, 255, 0), -1)
+            for point in points_2D_from:
+                cv2.circle(image_from, tuple(map(int, point)), 5, (255, 0, 0), -1)
+            for point in undistorted_points_2D_from:
+                cv2.circle(image_from, tuple(map(int, point)), 5, (128, 0, 0), -1)
+            for point in rep_points_original:
+                cv2.circle(image_from, tuple(map(int, point)), 5, (0, 0, 255), -1)
             
-            for point in reconstructed_points:
-                cv2.circle(image, tuple(map(int, point)), 5, (255, 0, 0), -1)
+            for point in points_2D_to:
+                cv2.circle(image_to, tuple(map(int, point)), 5, (255, 0, 0), -1)
+            for point in undistorted_points_2D_to:
+                cv2.circle(image_to, tuple(map(int, point)), 5, (128, 0, 0), -1)
+            for point in rep_points:
+                cv2.circle(image_to, tuple(map(int, point)), 5, (0, 0, 255), -1)
             
-            cv2.imshow("image", image)
+            cv2.imshow("image_from", image_from)
+            cv2.imshow("image_to", image_to)
             cv2.waitKey(0)
+            
+            # break
+            
+            # reprojected_points = cam_model.project_points_to_view(tri_points, cam_from.name, cam_to.name)
+            # reprojected_points_2 = cam_model.project_to_camera(tri_points_2, cam_from.name, cam_to.name)
+            
+            # print(reprojected_points)
+            # print(reprojected_points_2)
+            
+            
+        
+            # world_points = cam_model.project_to_world(points_2D[main_cam.name], main_cam.name, aux_cam.name)
+            # reconstructed_points = cam_model.project_to_camera(world_points, main_cam.name, main_cam.name)
+            
+            # rmse += np.sqrt(((points_2D[aux_cam.name] - reconstructed_points)**2).mean(axis=0))
+        # print(f"RMSE ({main_cam.name} -> {aux_cam.name}): {rmse / len(filtered_target_wise_points)}")
+        

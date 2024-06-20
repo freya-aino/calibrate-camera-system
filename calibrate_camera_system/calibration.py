@@ -59,7 +59,7 @@ class IntrinsicsCalibrationManager:
             cameraMatrix=calibration_matrix, 
             distCoeffs=dist_coeffs)
     
-    def calibrate(self, target_datasets: List[TargetDataset], batch_size: int = 30, optim_iterations: int = 3, multiprocessing_workers: int = 12):
+    def calibrate(self, target_datasets: List[TargetDataset], batch_size: int = 30, optim_iterations: int = 3, high_rmse_cutoff_percentile: int = 60, multiprocessing_workers: int = 12):
         process_pool = Pool(multiprocessing_workers)
         
         self.logger.info(f"intrinsics calibration: batch size = {batch_size}, iterations = {optim_iterations} on {multiprocessing_workers} workers ...")
@@ -113,12 +113,19 @@ class IntrinsicsCalibrationManager:
             
             res = results[ds.camera.name]
             
+            # filter results on low rmse
+            res = sorted(res, key=lambda x: x[0])
+            cutoff_rmse_p = np.percentile([r[0] for r in res], 100 - high_rmse_cutoff_percentile)
+            
+            res = [r for r in res if r[0] < cutoff_rmse_p]
+            self.logger.info(f"camera {ds.camera.name} - number of good rmse calibrations: {len(res)} cut off at rmse = {cutoff_rmse_p} percentile")
+            
             # results return in format: rmse, calibration_matrix_, dist_coeffs_, r_vecs, t_vecs
             outputs.append(Intrinsics(
                 camera = ds.camera,
-                rmse = sum([res[0] for res in res]) / len(res),
-                calibration_matrix = sum([res[1] for res in res]) / len(res),
-                distortion_coefficients = np.sum([res[2].flatten() for res in res], axis=0) / len(res)
+                rmse = sum([res_[0] for res_ in res]) / len(res),
+                calibration_matrix = sum([res_[1] for res_ in res]) / len(res),
+                distortion_coefficients = np.sum([res_[2].flatten() for res_ in res], axis=0) / len(res)
             ))
         
         for o in outputs:
@@ -242,7 +249,7 @@ class ExtrinsicsCalibrationManager:
         )
         return rmse, rot, trans.flatten()
     
-    def calibrate(self, target_datasets: List[TargetDataset], camera_intrinsics: List[Intrinsics], batch_size: int = 30, optim_iterations: int = 3, multiprocessing_workers: int = 16):
+    def calibrate(self, target_datasets: List[TargetDataset], camera_intrinsics: List[Intrinsics], batch_size: int = 30, optim_iterations: int = 3, high_rmse_cutoff_percentile: int = 60, multiprocessing_workers: int = 16):
         process_pool = Pool(multiprocessing_workers)
         
         # calibrate extrinsics
@@ -296,20 +303,11 @@ class ExtrinsicsCalibrationManager:
                         process_results[key].append(res_)
                     
             
-            # collect results and format into Extrinsics
+            # collect results
+            results = {}
             for k in process_results:
-                results = [res.get() for res in tqdm(process_results[k], desc=f"calibrating  extrinsics {k}")]
-                
-                # results return in format: rmse, rotation_mat, translation_vec
-                outputs.append(
-                    Extrinsics(
-                        camera_from = camera_intrinsics_lut[k[0]].camera,
-                        camera_to = camera_intrinsics_lut[k[1]].camera,
-                        rmse = sum([res[0] for res in results]) / len(results),
-                        rotation_matrix = np.sum([res[1] for res in results], axis=0) / len(results),
-                        translation_vector = np.sum([res[2] for res in results], axis=0) / len(results)
-                    )
-                )
+                results[k] = [res.get() for res in tqdm(process_results[k], desc=f"calibrating  extrinsics {k}")]
+            
             
         except Exception as e:
             raise e
@@ -320,6 +318,28 @@ class ExtrinsicsCalibrationManager:
                 for res in process_results[k]:
                     res.wait()
             process_pool.join()
+        
+        
+        for (k, res) in results.items():
+            
+            # filter results on low rmse
+            res = sorted(res, key=lambda x: x[0])
+            cutoff_rmse_p = np.percentile([r[0] for r in res], 100 - high_rmse_cutoff_percentile)
+            res = [r for r in res if r[0] < cutoff_rmse_p]
+            
+            self.logger.info(f"{k[0]} -> {k[1]} - number of good rmse calibrations: {len(res)} cut of at rmse = {cutoff_rmse_p} percentile")
+            
+            # results return in format: rmse, rotation_mat, translation_vec
+            outputs.append(
+                Extrinsics(
+                    camera_from = camera_intrinsics_lut[k[0]].camera,
+                    camera_to = camera_intrinsics_lut[k[1]].camera,
+                    rmse = sum([res_[0] for res_ in res]) / len(res),
+                    rotation_matrix = np.sum([res_[1] for res_ in res], axis=0) / len(res),
+                    translation_vector = np.sum([res_[2] for res_ in res], axis=0) / len(res)
+                )
+            )
+        
         
         for o in outputs:
             self.logger.info(f"{o.camera_from.name} -> {o.camera_to.name} - calibration rmse: {o.rmse}")
