@@ -1,5 +1,8 @@
 import cv2
 import os
+import random
+import numpy as np
+
 from logging import basicConfig, getLogger
 from argparse import ArgumentParser
 from device_capture_system.deviceIO import load_all_devices_from_config
@@ -21,14 +24,13 @@ arg_parser.add_argument("--num-frames-to-collect", type=int, default=100)
 arg_parser.add_argument("--frame-collection-interval", type=float, default=0.1)
 
 arg_parser.add_argument("--find-targets", action="store_true")
-# arg_parser.add_argument("--remove-images-without-targets", action="store_true")
 
 arg_parser.add_argument("--calibrate-intrinsics", action="store_true")
 arg_parser.add_argument("--calibrate-extrinsics", action="store_true")
-arg_parser.add_argument("--calibration-iterations", type=int, default=3)
-arg_parser.add_argument("--calibration-batch-size", type=int, default=40)
-arg_parser.add_argument("--point-top-std-exclusion-percentle", type=float, default=5)
-arg_parser.add_argument("--target_top_inverse_distance_exclusion_percentile", type=float, default=5)
+arg_parser.add_argument("--calibration-iterations", type=int, default=10)
+arg_parser.add_argument("--calibration-batch-size", type=int, default=30)
+arg_parser.add_argument("--point-top-std-exclusion-percentle", type=float, default=30)
+arg_parser.add_argument("--target-top-inverse-distance-exclusion-percentile", type=float, default=30)
 
 arg_parser.add_argument("--remove-images-without-targets", action="store_true", help="remove images without targets after calibration")
 
@@ -200,42 +202,81 @@ if __name__ == "__main__":
                 if target.image_name not in target_wise_points:
                     target_wise_points[target.image_name] = {}
                 target_wise_points[target.image_name][target_ds.camera.name] = target.target_points
-        filtered_target_wise_points = {}
+        filtered_target_wise_points = []
         for twp in target_wise_points:
             if len(target_wise_points[twp]) == len(cameras):
-                filtered_target_wise_points[twp] = target_wise_points[twp]
+                filtered_target_wise_points.append({
+                    "image_name": twp,
+                    "target_points": target_wise_points[twp]
+                })
         
         
-        for target_set in filtered_target_wise_points:
+        # # calculate reprojection error
+        # total_error = {cam_from.name: {cam_to.name: 0 for cam_to in cameras} for cam_from in cameras}
+        
+        # for target in filtered_target_wise_points:
+        #     image_name, points_2D = target["image_name"], target["target_points"]
             
-            points_2D = filtered_target_wise_points[target_set]
+        #     for main_cam in cameras:
+                
+        #         points_3D = cam_model.project_points(points_2D, main_cam_name=main_cam.name)
+                
+        #         for aux_cam in cameras:
+        #             if aux_cam.name == main_cam.name:
+        #                 continue
+        #             reprojected_points = cam_model.reproject_points(points_3D[aux_cam.name], aux_cam.name, main_cam.name)
+        #             error = cv2.norm(points_2D[main_cam.name], reprojected_points, cv2.NORM_L1)
+        #             total_error[main_cam.name][aux_cam.name] += error
             
-            # project points and reproject points
-            # points_3D = {}
-            # reprojected_points = {}
-            main_cam = cameras[0]
+        # for cam_from in total_error:
+        #     for cam_to in total_error[cam_from]:
+        #         total_error[cam_from][cam_to] /= len(filtered_target_wise_points)
+        
+        # for cam_from in total_error:
+        #     print(f"camera: {cam_from}")
+        #     for cam_to in total_error[cam_from]:
+        #         print(f"    {cam_to}: {total_error[cam_from][cam_to]}")
+        
+        
+        
+        
+        main_cam = cameras[0]
+        aux_cam = cameras[2] # for visualization
+        
+        
+        rmse = 0
+        for target in filtered_target_wise_points:
+            image_name, points_2D = target["image_name"], target["target_points"]
             
-            points_3D = cam_model.project_points(points_2D, main_cam_name=main_cam.name)
-            points_3D = points_3D[cameras[1].name]
+            world_points = cam_model.project_to_world(points_2D[main_cam.name], main_cam.name, aux_cam.name)
+            reconstructed_points = cam_model.project_to_camera(world_points, main_cam.name, main_cam.name)
             
-            reprojected_points = cam_model.reproject_points(points_3D, main_cam.name, cameras[1].name)
-            #     cam_from_name: cam_model.reproject_points(points_3D[main_cam.name][cam_from_name], cam_from_name, main_cam.name) for cam_from_name in points_3D[main_cam.name]
-            # }
+            rmse += np.sqrt(((points_2D[aux_cam.name] - reconstructed_points)**2).mean(axis=0))
+        print(f"RMSE ({main_cam.name} -> {aux_cam.name}): {rmse / len(filtered_target_wise_points)}")
+        
+        exit()
+        
+        for target in random.sample(filtered_target_wise_points, 10):
+            image_name, points_2D = target["image_name"], target["target_points"]
             
-            print(points_2D[cameras[1].name])
-            print(points_3D)
-            print(reprojected_points)
+            print(points_2D[main_cam.name])
+            
+            world_points = cam_model.project_to_world(points_2D[main_cam.name], main_cam.name, aux_cam.name)
+            
+            print(world_points)
+            
+            reconstructed_points = cam_model.project_to_camera(world_points, main_cam.name, aux_cam.name)
+            
+            print(reconstructed_points)
             
             # visualize image and points
-            image = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{cameras[1].name}", f"{target_set}"))
-            for point in points_2D[cameras[1].name]:
+            image = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{aux_cam.name}", f"{image_name}"))
+            
+            for point in points_2D[aux_cam.name]:
                 cv2.circle(image, tuple(map(int, point)), 5, (0, 255, 0), -1)
-            for point in reprojected_points:
+            
+            for point in reconstructed_points:
                 cv2.circle(image, tuple(map(int, point)), 5, (255, 0, 0), -1)
             
             cv2.imshow("image", image)
             cv2.waitKey(0)
-            
-            
-            break
-            

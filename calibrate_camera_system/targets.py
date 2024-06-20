@@ -32,7 +32,7 @@ class TargetManager:
         target_points = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), subpix_criteria).squeeze()
         return TargetData(image_name=image_name, target_points=target_points)
     
-    def extract_target_data_from_images(self, cameras: List[CameraDevice], multiprocessing_workser: int = 4):
+    def extract_target_data_from_images(self, cameras: List[CameraDevice], multiprocessing_workser: int = 16):
         process_pool = Pool(multiprocessing_workser)
         
         process_results = {camera.name: [] for camera in cameras}
@@ -53,6 +53,7 @@ class TargetManager:
             results = {}
             for cam_name in process_results:
                 results[cam_name] = [result.get() for result in tqdm(process_results[cam_name], desc=f"extracting targets for {cam_name}")] 
+                results[cam_name] = [res for res in results[cam_name] if res is not None and res.target_points.shape[0] == np.prod(self.target_parameters.num_target_corners_wh)]
             
         except:
             raise

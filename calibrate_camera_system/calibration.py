@@ -74,18 +74,18 @@ class IntrinsicsCalibrationManager:
                 target_points = np.stack([target.target_points for target in target_data], axis=0)
                 num_target_points = len(target_data)
                 
-                batches_indecies = [np.random.randint(num_target_points, size=batch_size) for _ in range(optim_iterations)]
                 model_points_batch = generate_model_points(self.target_parameters, batch_size).astype(np.float32)
-                target_points_batches = [target_points[batch_indexes].astype(np.float32) for batch_indexes in batches_indecies]
-                
-                
-                for batch in target_points_batches:
+                for i in range(optim_iterations):
+                    
+                    batch_indecies = np.random.randint(num_target_points, size=batch_size)
+                    target_points_batch = target_points[batch_indecies].astype(np.float32)
+                    
                     # calibrate camera
                     res_ = process_pool.apply_async(
                         self.calibrate_camera_worker, 
                         args = (
                             model_points_batch,
-                            batch,
+                            target_points_batch,
                             self.capture_size,
                             self.initial_calibration_matrix,
                             self.initial_dist_coeffs
@@ -107,7 +107,6 @@ class IntrinsicsCalibrationManager:
                     res.wait()
             process_pool.join()
         
-        
         # format output
         outputs = []
         for ds in target_datasets:
@@ -122,6 +121,9 @@ class IntrinsicsCalibrationManager:
                 distortion_coefficients = np.sum([res[2].flatten() for res in res], axis=0) / len(res)
             ))
         
+        for o in outputs:
+            self.logger.info(f"{o.camera.name} - calibration rmse: {o.rmse}")
+        
         return outputs
         
     def filter_targets(self, target_dataset: TargetDataset, point_top_std_exclusion_percentle: float = 10, target_top_inverse_distance_exclusion_percentile: float = 20):
@@ -130,7 +132,7 @@ class IntrinsicsCalibrationManager:
         
         # the targets are normalized locally to make their variance uniform over all targets
         # then the points with high variance for each target are flagged as outliers
-        normalised_patterns = np.stack([Z_norm(target.target_points) for target in target_dataset.target_data], axis=0)
+        normalised_patterns = np.stack([Z_norm(target.target_points) for target in targets], axis=0)
         per_point_std = np.sqrt((normalised_patterns - normalised_patterns.mean(axis=0))**2)
         top_std_percentile_threshold = np.percentile(per_point_std, (100 - point_top_std_exclusion_percentle), axis=0)
         valid_std_mask = per_point_std <= np.expand_dims(top_std_percentile_threshold, axis=0)
@@ -225,8 +227,8 @@ class ExtrinsicsCalibrationManager:
         cam_to_target_points: np.ndarray,
         cam_from_intrinsics: Intrinsics,
         cam_to_intrinsics: Intrinsics,
-        capture_size: Tuple[int, int]
-    ):
+        capture_size: Tuple[int, int]):
+        
         rmse, _, _, _, _, rot, trans, _, _ = cv2.stereoCalibrate(
             objectPoints  = model_points,
             imagePoints1  = cam_from_target_points,
@@ -318,5 +320,8 @@ class ExtrinsicsCalibrationManager:
                 for res in process_results[k]:
                     res.wait()
             process_pool.join()
+        
+        for o in outputs:
+            self.logger.info(f"{o.camera_from.name} -> {o.camera_to.name} - calibration rmse: {o.rmse}")
         
         return outputs
