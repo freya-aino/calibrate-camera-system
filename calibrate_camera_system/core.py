@@ -102,15 +102,6 @@ class CameraModel:
                 self.extrinsics[cam_from_name] = {}
             self.extrinsics[cam_from_name][cam_to_name] = extrinsic
         
-        # # calculate projection matrices
-        # self.projection_matrices = {}
-        # for cam_from_name in self.ext:
-        #     self.projection_matrices[cam_from_name] = {}
-        #     for cam_to_name in self.ext[cam_from_name]:
-        #         rot_mat = self.ext[cam_from_name][cam_to_name].rotation_matrix
-        #         trans_vec = self.ext[cam_from_name][cam_to_name].translation_vector.reshape(3, 1)
-        #         self.projection_matrices[cam_from_name][cam_to_name] = self.intrinsics[cam_from_name].calibration_matrix @ np.concatenate([rot_mat, trans_vec], axis=1)
-        
     def undistort_points(self, points: np.ndarray, cam_name: str):
         intrinsics = self.intrinsics[cam_name]
         
@@ -126,73 +117,20 @@ class CameraModel:
         
         return pixel_points
     
-    # def triangulate_points(self, points_from: np.ndarray, points_to: np.ndarray, cam_from_name: str, cam_to_name: str):
-    #     points_4D = cv2.triangulatePoints(
-    #         projMatr1 = self.projection_matrices[cam_from_name][cam_to_name],
-    #         projMatr2 = self.projection_matrices[cam_to_name][cam_from_name],
-    #         projPoints1 = points_from,
-    #         projPoints2 = points_to
-    #     )
+    def unified_3D_model(self, points: dict[str, np.ndarray], main_cam_name: str):
         
-    #     # to homogeneous coordinates and return
-    #     return points_4D[:3] / points_4D[3]
-    
-    # def project_points(self, points: dict[str, np.ndarray], main_cam_name: str):
-    #     points = deepcopy(points)
+        projected_points = {}
+        for cam_name in points:
+            if cam_name == main_cam_name:
+                continue
+            projected_points[cam_name] = self.triangulate_points(
+                points_from = points[cam_name],
+                points_to = points[main_cam_name],
+                cam_from_name = cam_name,
+                cam_to_name = main_cam_name
+            )
         
-    #     # undistort all points
-    #     for cam_name, points_ in points.items():
-    #         points_ = points_.reshape(-1, 1, 2)
-    #         points[cam_name] = self.undistort_points(points_, cam_name)
-        
-    #     # triangulate all points relative to main camera
-    #     output_3D_points = {}
-    #     for cam_name, points_ in points.items():
-    #         if cam_name == main_cam_name:
-    #             continue
-            
-    #         points_from = points_.T
-    #         points_to = points[main_cam_name].T
-            
-    #         output_3D_points[cam_name] = self.triangulate_points(
-    #                 points_from = points_from, 
-    #                 points_to = points_to,
-    #                 cam_from_name = cam_name,
-    #                 cam_to_name = main_cam_name)
-    #         output_3D_points[cam_name] = output_3D_points[cam_name].T
-            
-    #     return output_3D_points
-    
-    # def reproject_points(self, points_3D: np.ndarray, cam_from_name: str, cam_to_name: str):
-    #     # # Project 3D points onto the 2D plane of the specified camera
-    #     # points_3D = points_3D.T
-        
-    #     # homogeneous_points = np.vstack((points_3D, np.ones((1, points_3D.shape[1]))))
-        
-    #     # points_2D = self.projection_matrices[cam_to_name][cam_from_name] @ homogeneous_points
-        
-    #     # # Convert to non-homogeneous coordinates
-    #     # points_2D = points_2D[:2] / points_2D[2]
-        
-    #     points_3D = np.expand_dims(points_3D, axis=1)
-        
-    #     ext = self.ext[cam_to_name][cam_from_name]
-        
-    #     rvec, _ = cv2.Rodrigues(ext.rotation_matrix)
-    #     tvec = ext.translation_vector.reshape(3, 1)
-    #     camera_mat = self.intrinsics[cam_to_name].calibration_matrix
-    #     dist_coeffs = self.intrinsics[cam_to_name].distortion_coefficients
-        
-    #     points_2D, _ = cv2.projectPoints(
-    #         objectPoints = points_3D,
-    #         rvec = rvec,
-    #         tvec = tvec,
-    #         cameraMatrix = camera_mat,
-    #         distCoeffs = dist_coeffs
-    #     )
-        
-    #     return points_2D.squeeze()
-    
+        return projected_points
     
     def triangulate_points(self, points_from: np.ndarray, points_to: np.ndarray, cam_from_name: str, cam_to_name: str):
         # Convert 2D points to 3D in camera coordinate system
@@ -232,51 +170,3 @@ class CameraModel:
         )
         return points_2D.squeeze()
         
-    
-    # def project_to_world(self, cam_from_points, cam_from_name, cam_to_name):
-    #     # Convert 2D points to 3D in camera coordinate system
-    #     camera_matrix = self.intrinsics[cam_from_name].calibration_matrix
-    #     dist_coeffs = self.intrinsics[cam_from_name].distortion_coefficients
-        
-    #     cam_from_points = cam_from_points.reshape(-1, 1, 2)
-    #     points_3D = cv2.undistortPoints(cam_from_points, camera_matrix, dist_coeffs)
-    #     points_3D = points_3D.squeeze()
-    #     # Assuming a fixed Z with value 1 for simplicity
-    #     points_3D = np.concatenate([points_3D, np.ones((points_3D.shape[0], 1))], axis=-1)
-        
-    #     # Convert 3D points in camera coordinate system to world coordinate system
-    #     rmat = self.extrinsics[cam_from_name][cam_to_name].rotation_matrix
-    #     tvec = self.extrinsics[cam_from_name][cam_to_name].translation_vector
-        
-    #     points_world = (rmat @ points_3D.T).T + tvec
-    #     return points_world
-    
-    # def project_to_camera(self, world_points, cam_from_name, cam_to_name):
-    #     # # Convert 3D points from world to target camera coordinate system
-        
-    #     world_points = np.hstack((world_points, np.ones((world_points.shape[0], 1))))
-        
-    #     P = np.dot(
-    #         self.intrinsics[cam_to_name].calibration_matrix.T,
-    #         np.hstack((
-    #             self.extrinsics[cam_from_name][cam_to_name].rotation_matrix,
-    #             self.extrinsics[cam_from_name][cam_to_name].translation_vector.reshape(3, 1)
-    #         )))
-        
-    #     points_2D = P @ world_points.T
-    #     points_2D = points_2D[:2] / points_2D[2]
-        
-    #     # inv_rmat = rmat.T
-    #     # inv_tvec = -inv_rmat @ tvec
-    #     # points_cam = (inv_rmat @ world_points.T).T + inv_tvec
-        
-    #     # rmat = self.extrinsics[cam_to_name][cam_from_name].rotation_matrix
-    #     # tvec = self.extrinsics[cam_to_name][cam_from_name].translation_vector
-    #     # points_cam = (rmat @ (world_points - tvec).T).T
-        
-    #     # # Project 3D points to 2D in the target camera image coordinate space
-    #     # camera_matrix = self.intrinsics[cam_to_name].calibration_matrix
-    #     # dist_coeffs = self.intrinsics[cam_to_name].distortion_coefficients
-    #     # points_2D, _ = cv2.projectPoints(points_cam, np.zeros(3), np.zeros(3), camera_matrix, dist_coeffs)
-        
-    #     return points_2D.squeeze().T

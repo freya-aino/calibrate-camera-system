@@ -217,103 +217,48 @@ if __name__ == "__main__":
                 })
         
         
-        # # calculate reprojection error
-        # total_error = {cam_from.name: {cam_to.name: 0 for cam_to in cameras} for cam_from in cameras}
-        
-        # for target in filtered_target_wise_points:
-        #     image_name, points_2D = target["image_name"], target["target_points"]
-            
-        #     for main_cam in cameras:
-                
-        #         points_3D = cam_model.project_points(points_2D, main_cam_name=main_cam.name)
-                
-        #         for aux_cam in cameras:
-        #             if aux_cam.name == main_cam.name:
-        #                 continue
-        #             reprojected_points = cam_model.reproject_points(points_3D[aux_cam.name], aux_cam.name, main_cam.name)
-        #             error = cv2.norm(points_2D[main_cam.name], reprojected_points, cv2.NORM_L1)
-        #             total_error[main_cam.name][aux_cam.name] += error
-            
-        # for cam_from in total_error:
-        #     for cam_to in total_error[cam_from]:
-        #         total_error[cam_from][cam_to] /= len(filtered_target_wise_points)
-        
-        # for cam_from in total_error:
-        #     print(f"camera: {cam_from}")
-        #     for cam_to in total_error[cam_from]:
-        #         print(f"    {cam_to}: {total_error[cam_from][cam_to]}")
-        
-        
-        
-        
-        cam_from = cameras[2]
-        # cam_from_2 = cameras[1]
-        cam_to = cameras[0]
         
         
         def rmse(a, b):
             return np.sqrt(((a - b)**2).mean(axis=0))
         
+        total_rmse = {cam.name: {cam2.name: 0 for cam2 in cameras} for cam in cameras}
+        for target in filtered_target_wise_points:
+            
+            image_name, points_2D = target["image_name"], target["target_points"]
+            
+            for main_cam in cameras:
+                
+                points_3D = cam_model.unified_3D_model(points = points_2D, main_cam_name = main_cam.name)
+                
+                for cam_name in points_3D:
+                    repro = cam_model.project_points_to_view(points_3D[cam_name], cam_name, main_cam.name)
+                    total_rmse[main_cam.name][cam_name] += rmse(points_2D[main_cam.name], repro).mean()
+        
+        for main_cam_name in total_rmse:
+            for cam_name in total_rmse[main_cam_name]:
+                total_rmse[main_cam_name][cam_name] /= len(filtered_target_wise_points)
+                print(f"RMSE: {main_cam_name} -> {cam_name}: {total_rmse[main_cam_name][cam_name]}")
+        
+        
+        # visualize image and points
         for target in random.sample(filtered_target_wise_points, 10):
             image_name, points_2D = target["image_name"], target["target_points"]
-            points_2D_from = points_2D[cam_from.name]
-            points_2D_to = points_2D[cam_to.name]
-            # points_2D_from_2 = points_2D[cam_from_2.name]
             
-            undistorted_points_2D_from = cam_model.undistort_points(points_2D_from, cam_from.name)
-            undistorted_points_2D_to = cam_model.undistort_points(points_2D_to, cam_to.name)
+            points_3D = cam_model.unified_3D_model(points = points_2D, main_cam_name = main_cam.name)
+            reprojections = {cam_name: cam_model.project_points_to_view(points_3D[cam_name], cam_name, main_cam.name) for cam_name in points_3D}
+            combined_points = np.mean(np.stack([points_3D[cam_name] for cam_name in points_3D]), axis=0)
             
-            tri_points = cam_model.triangulate_points(points_2D_from, points_2D_to, cam_from.name, cam_to.name)
-            # tri_points = cam_model.project_to_world(points_2D_from, cam_from.name, cam_to.name)
+            image = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{main_cam.name}", f"{image_name}"))
             
-            # rep_points = cam_model.project_to_camera(tri_points, cam_from.name, cam_to.name)
-            # rep_points_original = cam_model.project_to_camera(tri_points, cam_from.name, cam_from.name)
-            rep_points = cam_model.project_points_to_view(tri_points, cam_from.name, cam_to.name)
-            rep_points_original = cam_model.project_points_to_view(tri_points, cam_from.name, cam_from.name)
+            for point in points_2D[main_cam.name]:
+                cv2.circle(image, tuple(map(int, point)), 5, (255, 0, 0), -1)
             
-            print(tri_points)
-            print(rep_points)
-            print(rep_points_original)
-            
-            print(f"rmse original: {rmse(undistorted_points_2D_from, rep_points_original)}")
-            print(f"rmse reprojected: {rmse(undistorted_points_2D_to, rep_points)}")
+            for cam_name in reprojections:
+                for point in reprojections[cam_name]:
+                    cv2.circle(image, tuple(map(int, point)), 5, (0, 255, 0), -1)
             
             
-            # visualize image and points
-            image_from = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{cam_from.name}", f"{image_name}"))
-            image_to = cv2.imread(os.path.join(IMAGE_SAVE_PATH, f"{cam_to.name}", f"{image_name}"))
-            
-            for point in points_2D_from:
-                cv2.circle(image_from, tuple(map(int, point)), 5, (255, 0, 0), -1)
-            for point in undistorted_points_2D_from:
-                cv2.circle(image_from, tuple(map(int, point)), 5, (128, 0, 0), -1)
-            for point in rep_points_original:
-                cv2.circle(image_from, tuple(map(int, point)), 5, (0, 0, 255), -1)
-            
-            for point in points_2D_to:
-                cv2.circle(image_to, tuple(map(int, point)), 5, (255, 0, 0), -1)
-            for point in undistorted_points_2D_to:
-                cv2.circle(image_to, tuple(map(int, point)), 5, (128, 0, 0), -1)
-            for point in rep_points:
-                cv2.circle(image_to, tuple(map(int, point)), 5, (0, 0, 255), -1)
-            
-            cv2.imshow("image_from", image_from)
-            cv2.imshow("image_to", image_to)
+            cv2.imshow("main_cam_image", image)
             cv2.waitKey(0)
             
-            # break
-            
-            # reprojected_points = cam_model.project_points_to_view(tri_points, cam_from.name, cam_to.name)
-            # reprojected_points_2 = cam_model.project_to_camera(tri_points_2, cam_from.name, cam_to.name)
-            
-            # print(reprojected_points)
-            # print(reprojected_points_2)
-            
-            
-        
-            # world_points = cam_model.project_to_world(points_2D[main_cam.name], main_cam.name, aux_cam.name)
-            # reconstructed_points = cam_model.project_to_camera(world_points, main_cam.name, main_cam.name)
-            
-            # rmse += np.sqrt(((points_2D[aux_cam.name] - reconstructed_points)**2).mean(axis=0))
-        # print(f"RMSE ({main_cam.name} -> {aux_cam.name}): {rmse / len(filtered_target_wise_points)}")
-        
