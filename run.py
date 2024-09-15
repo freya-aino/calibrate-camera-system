@@ -217,8 +217,6 @@ if __name__ == "__main__":
                 })
         
         
-        
-        
         def rmse(a, b):
             return np.sqrt(((a - b)**2).mean(axis=0))
         

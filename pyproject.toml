@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "calibrate-camera-system"
-version = "0.1.0"
+version = "1.0.0"
 description = ""
 authors = ["kristina-aino <kristina.ai@proton.me>"]
 readme = "README.md"
