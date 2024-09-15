@@ -48,6 +48,8 @@ class TargetData(BaseModel):
     def check_target_points(cls, value):
         if not isinstance(value, ndarray):
             raise TypeError("target_points must be a numpy array")
+        if len(value.shape) != 2 or value.shape[1] != 2:
+            raise ValueError("target_points must be a 2D array")
         return value
 
 class TargetDataset(BaseModel):
